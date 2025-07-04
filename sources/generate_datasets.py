@@ -163,3 +163,6 @@ def find_finding(key, spiced_train_ds, spiced_val_ds, spiced_test_ds):
     if not finding:
         finding = spiced_test_ds.filter(lambda example: example['instance_id'] == key)
     return finding
+
+if __name__ == '__main__':
+    generate_baseline_datasets()
