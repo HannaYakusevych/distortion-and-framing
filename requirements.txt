@@ -1,7 +1,30 @@
-#python=3.10
-datasets~=3.5.0
+# Python version requirement
+# python>=3.10
+
+# Core ML and Data Science
+numpy~=1.26.0
 pandas~=2.2.3
-transformers~=4.52.4
 scikit-learn~=1.6.1
+
+# Deep Learning
 torch~=2.7.1
+transformers~=4.52.4
 accelerate~=1.8.1
+datasets~=3.5.0
+
+# Visualization
+matplotlib~=3.8.0
+seaborn~=0.13.0
+
+# Jupyter and Development
+jupyter~=1.0.0
+ipykernel~=6.29.0
+notebook~=7.0.0
+
+# Utilities
+tqdm~=4.66.0
+pathlib2~=2.3.7; python_version<"3.4"
+
+# Optional: Additional useful packages
+plotly~=5.17.0
+ipywidgets~=8.1.0
