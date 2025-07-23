@@ -20,7 +20,9 @@ def main():
     parser.add_argument('--model', choices=['causality-base', 'certainty-base', 'generalization-base', 'sensationalism-base', 'all'],
                        default='all', help='Which model to train')
     parser.add_argument('--use-compressed-data', choices=['true', 'false'], 
-                       default='false', help='Output directory')
+                       default='false', help='Use compressed data with fewer classes')
+    parser.add_argument('--use-scibert', choices=['true', 'false'], 
+                       default='false', help='Use SciBERT instead of RoBERTa for causality model')
     parser.add_argument('--output-dir', default='out', help='Output directory')
     
     args = parser.parse_args()
@@ -40,32 +42,43 @@ def main():
         results = {}
 
         use_compressed_data = args.use_compressed_data == 'true'
+        use_scibert = args.use_scibert == 'true'
         
         if args.model in ['causality-base', 'all']:
-            print("Training causality model...")
+            model_type = "SciBERT" if use_scibert else "RoBERTa"
+            print(f"Training causality model with {model_type}...")
             causality_trainer = CausalityBaselineTrainer( \
                 use_compressed_data = use_compressed_data, \
+                use_scibert = use_scibert, \
                 output_dir=args.output_dir)
             results['causality'] = causality_trainer.run_training()
             print("✓ Causality model trained")
         
         if args.model in ['certainty-base', 'all']:
-            print("Training certainty model...")
+            model_type = "SciBERT" if use_scibert else "RoBERTa"
+            print(f"Training certainty model with {model_type}...")
             certainty_trainer = CertaintyBaselineTrainer( \
                 use_compressed_data = use_compressed_data, \
+                use_scibert = use_scibert, \
                 output_dir=args.output_dir)
             results['certainty'] = certainty_trainer.run_training()
             print("✓ Certainty model trained")
         
         if args.model in ['generalization-base', 'all']:
-            print("Training generalization model...")
-            generalization_trainer = GeneralizationBaselineTrainer(output_dir=args.output_dir)
+            model_type = "SciBERT" if use_scibert else "RoBERTa"
+            print(f"Training generalization model with {model_type}...")
+            generalization_trainer = GeneralizationBaselineTrainer(
+                use_scibert=use_scibert,
+                output_dir=args.output_dir)
             results['generalization'] = generalization_trainer.run_training()
             print("✓ Generalization model trained")
         
         if args.model in ['sensationalism-base', 'all']:
-            print("Training sensationalism model...")
-            sensationalism_trainer = SensationalismBaselineTrainer(output_dir=args.output_dir)
+            model_type = "SciBERT" if use_scibert else "RoBERTa"
+            print(f"Training sensationalism model with {model_type}...")
+            sensationalism_trainer = SensationalismBaselineTrainer(
+                use_scibert=use_scibert,
+                output_dir=args.output_dir)
             results['sensationalism'] = sensationalism_trainer.run_training()
             print("✓ Sensationalism model trained")
         

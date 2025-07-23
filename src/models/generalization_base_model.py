@@ -8,10 +8,16 @@ import pandas as pd
 class GeneralizationBaselineTrainer(BaseBaselineTrainer):
     """Trainer for generalization classification task."""
     
-    def __init__(self, **kwargs):
+    def __init__(self, use_scibert: bool = False, **kwargs):
+        # Set model name based on scibert flag
+        if use_scibert:
+            kwargs.setdefault('model_name', 'allenai/scibert_scivocab_uncased')
+        
         # Use longer max_length for generalization task since it processes two texts
         kwargs.setdefault('max_length', 3072)
         super().__init__(**kwargs)
+        
+        self.use_scibert = use_scibert
         
         self.id2label = {
             0: "Paper Finding",
@@ -66,7 +72,8 @@ class GeneralizationBaselineTrainer(BaseBaselineTrainer):
         trainer = self.train_model(model, train_dataset)
         
         # Save model
-        model_path = self.output_dir / 'baseline_roberta_generalization'
+        model_name = 'baseline_scibert_generalization' if self.use_scibert else 'baseline_roberta_generalization'
+        model_path = self.output_dir / model_name
         model.save_pretrained(model_path)
         
         # Evaluate

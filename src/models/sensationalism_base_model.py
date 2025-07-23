@@ -66,8 +66,14 @@ class SensationalismBaselineTrainer:
                  output_dir: str = "out", 
                  temp_dir: str = "temp",
                  max_length: int = 1536,
+                 use_scibert: bool = False,
                  **training_kwargs):
+        # Set model name based on scibert flag
+        if use_scibert:
+            model_name = 'allenai/scibert_scivocab_uncased'
+        
         self.model_name = model_name
+        self.use_scibert = use_scibert
         self.output_dir = Path(output_dir)
         self.temp_dir = Path(temp_dir)
         self.max_length = max_length
@@ -186,7 +192,8 @@ class SensationalismBaselineTrainer:
         trainer = self.train_model(model, train_dataset)
         
         # Save model
-        model_path = self.output_dir / 'baseline_roberta_sensationalism'
+        model_name = 'baseline_scibert_sensationalism' if self.use_scibert else 'baseline_roberta_sensationalism'
+        model_path = self.output_dir / model_name
         model.save_pretrained(model_path)
         
         # Evaluate

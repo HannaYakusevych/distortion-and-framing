@@ -6,10 +6,15 @@ from .base_baseline_trainer import BaseBaselineTrainer
 class CertaintyBaselineTrainer(BaseBaselineTrainer):
     """Trainer for certainty classification task."""
     
-    def __init__(self, use_compressed_data: bool = False, **kwargs):
+    def __init__(self, use_compressed_data: bool = False, use_scibert: bool = False, **kwargs):
+        # Set model name based on scibert flag
+        if use_scibert:
+            kwargs.setdefault('model_name', 'allenai/scibert_scivocab_uncased')
+        
         super().__init__(**kwargs)
         
         self.use_compressed_data = use_compressed_data
+        self.use_scibert = use_scibert
         
         if use_compressed_data:
             self.id2label = {
@@ -58,7 +63,8 @@ class CertaintyBaselineTrainer(BaseBaselineTrainer):
         trainer = self.train_model(model, train_dataset)
         
         # Save model
-        model_path = self.output_dir / 'baseline_roberta_certainty'
+        model_name = 'baseline_scibert_certainty' if self.use_scibert else 'baseline_roberta_certainty'
+        model_path = self.output_dir / model_name
         model.save_pretrained(model_path)
         
         # Evaluate

@@ -15,7 +15,7 @@ import json
 
 from transformers import set_seed
 
-def run_baseline_experiments(use_compressed_data: bool = False):
+def run_baseline_experiments(use_compressed_data: bool = False, use_scibert: bool = False):
     """Run all baseline experiments and save results."""
     print("Starting baseline experiments...")
     
@@ -27,23 +27,35 @@ def run_baseline_experiments(use_compressed_data: bool = False):
     results = {}
     
     # Causality
-    causality_trainer = CausalityBaselineTrainer(use_compressed_data = use_compressed_data)
+    model_type = "SciBERT" if use_scibert else "RoBERTa"
+    print(f"Training causality model with {model_type}...")
+    causality_trainer = CausalityBaselineTrainer(
+        use_compressed_data=use_compressed_data,
+        use_scibert=use_scibert
+    )
     results['causality'] = causality_trainer.run_training()
     
     # Certainty  
-    certainty_trainer = CertaintyBaselineTrainer(use_compressed_data = use_compressed_data)
+    print(f"Training certainty model with {model_type}...")
+    certainty_trainer = CertaintyBaselineTrainer(
+        use_compressed_data=use_compressed_data,
+        use_scibert=use_scibert
+    )
     results['certainty'] = certainty_trainer.run_training()
     
     # Generalization
-    generalization_trainer = GeneralizationBaselineTrainer()
+    print(f"Training generalization model with {model_type}...")
+    generalization_trainer = GeneralizationBaselineTrainer(use_scibert=use_scibert)
     results['generalization'] = generalization_trainer.run_training()
     
     # Sensationalism
-    sensationalism_trainer = SensationalismBaselineTrainer()
+    print(f"Training sensationalism model with {model_type}...")
+    sensationalism_trainer = SensationalismBaselineTrainer(use_scibert=use_scibert)
     results['sensationalism'] = sensationalism_trainer.run_training()
     
     # Save results
-    output_file = Path(f'out/baseline_results_{use_compressed_data}.json')
+    model_suffix = "scibert" if use_scibert else "roberta"
+    output_file = Path(f'out/baseline_results_{use_compressed_data}_{model_suffix}.json')
     output_file.parent.mkdir(exist_ok=True)
     
     # Convert numpy arrays to lists for JSON serialization
@@ -73,5 +85,16 @@ def run_baseline_experiments(use_compressed_data: bool = False):
 if __name__ == '__main__':
     set_seed(42)
 
-    run_baseline_experiments(use_compressed_data=False)
-    run_baseline_experiments(use_compressed_data=True)
+    # Run experiments with RoBERTa
+    print("="*60)
+    print("RUNNING ROBERTA EXPERIMENTS")
+    print("="*60)
+    run_baseline_experiments(use_compressed_data=False, use_scibert=False)
+    run_baseline_experiments(use_compressed_data=True, use_scibert=False)
+    
+    # Run experiments with SciBERT
+    print("\n" + "="*60)
+    print("RUNNING SCIBERT EXPERIMENTS")
+    print("="*60)
+    run_baseline_experiments(use_compressed_data=False, use_scibert=True)
+    run_baseline_experiments(use_compressed_data=True, use_scibert=True)
