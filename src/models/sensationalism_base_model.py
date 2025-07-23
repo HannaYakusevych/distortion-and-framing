@@ -9,54 +9,12 @@ from scipy.stats import pearsonr
 from torch import nn
 from transformers import (
     AutoConfig,
-    RobertaForSequenceClassification,
-    RobertaTokenizerFast,
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
     Trainer,
     TrainingArguments,
 )
 from transformers.modeling_outputs import SequenceClassifierOutput
-
-
-class RobertaForRegression(RobertaForSequenceClassification):
-    """RoBERTa model adapted for regression tasks."""
-    
-    def __init__(self, config):
-        super().__init__(config)
-        # Replace classifier with regression head
-        self.classifier = nn.Linear(config.hidden_size, 1)
-        self.num_labels = 1
-        
-    def forward(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
-        # Filter out unexpected kwargs that RoBERTa doesn't accept
-        roberta_kwargs = {}
-        valid_keys = {'token_type_ids', 'position_ids', 'head_mask', 'inputs_embeds', 
-                     'output_attentions', 'output_hidden_states', 'return_dict'}
-        for key, value in kwargs.items():
-            if key in valid_keys:
-                roberta_kwargs[key] = value
-        
-        outputs = self.roberta(input_ids=input_ids, attention_mask=attention_mask, **roberta_kwargs)
-        # Get the pooled output (CLS token representation)
-        if hasattr(outputs, 'pooler_output') and outputs.pooler_output is not None:
-            pooled_output = outputs.pooler_output
-        else:
-            # If no pooler output, use the first token (CLS) from last hidden state
-            pooled_output = outputs.last_hidden_state[:, 0, :]
-        logits = self.classifier(pooled_output)
-        
-        loss = None
-        if labels is not None:
-            loss_fct = nn.MSELoss()
-            loss = loss_fct(logits.squeeze(), labels.float())
-            
-        # Return a dictionary-like object that the Trainer can handle
-        return SequenceClassifierOutput(
-            loss=loss,
-            logits=logits,
-            hidden_states=outputs.hidden_states if hasattr(outputs, 'hidden_states') else None,
-            attentions=outputs.attentions if hasattr(outputs, 'attentions') else None,
-        )
-
 
 class SensationalismBaselineTrainer:
     """Trainer for sensationalism regression task."""
@@ -80,7 +38,7 @@ class SensationalismBaselineTrainer:
         self.training_kwargs = training_kwargs
         
         # Initialize tokenizer
-        self.tokenizer = RobertaTokenizerFast.from_pretrained(model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
     
     def load_data(self, train_file: str, test_file: str):
         """Load and prepare sensationalism regression data."""
@@ -118,16 +76,13 @@ class SensationalismBaselineTrainer:
         return train_dataset, test_dataset
     
     def create_model(self):
-        """Create RoBERTa regression model."""
-        config = AutoConfig.from_pretrained(self.model_name)
-        config.num_labels = 1
+        """Create regression model (RoBERTa or SciBERT)."""
+        # Load pretrained model for sequence classification
+        model = AutoModelForSequenceClassification.from_pretrained(self.model_name, num_labels=1)
         
-        # Load pretrained model and modify for regression
-        pretrained_model = RobertaForSequenceClassification.from_pretrained(self.model_name)
-        model = RobertaForRegression(config)
-        
-        # Copy pretrained weights (except classifier)
-        model.roberta.load_state_dict(pretrained_model.roberta.state_dict())
+        # Replace the classifier head with a regression head
+        model.classifier = nn.Linear(model.config.hidden_size, 1)
+        model.num_labels = 1
         
         return model
     
