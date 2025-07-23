@@ -8,6 +8,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 from src.data.dataset_generator import DatasetGenerator
 from src.models.causality_base_model import CausalityBaselineTrainer
 from src.models.certainty_base_model import CertaintyBaselineTrainer
+from src.models.generalization_base_model import GeneralizationBaselineTrainer
 from src.utils.evaluation import EvaluationUtils
 import json
 
@@ -31,6 +32,10 @@ def run_baseline_experiments(use_compressed_data: bool = False):
     # Certainty  
     certainty_trainer = CertaintyBaselineTrainer(use_compressed_data = use_compressed_data)
     results['certainty'] = certainty_trainer.run_training()
+    
+    # Generalization
+    generalization_trainer = GeneralizationBaselineTrainer()
+    results['generalization'] = generalization_trainer.run_training()
     
     # Save results
     output_file = Path(f'out/baseline_results_{use_compressed_data}.json')
