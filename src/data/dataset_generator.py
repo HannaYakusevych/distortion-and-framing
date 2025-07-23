@@ -72,11 +72,11 @@ class DatasetGenerator:
     def generate_sensationalism_dataset(self, spiced_train_ds, spiced_val_ds, spiced_test_ds):
         """Generate sensationalism regression dataset."""
         train_labels = pd.read_csv(
-            self.data_dir / "aggregated-labels/certainty/train-test-splits/sensationalism_train.tsv",
+            self.data_dir / "aggregated-labels/sensationalism/train-test-splits/sensationalism_train.csv",
             sep='\t'
         )
         test_labels = pd.read_csv(
-            self.data_dir / "aggregated-labels/certainty/train-test-splits/sensationalism_test.tsv",
+            self.data_dir / "aggregated-labels/sensationalism/train-test-splits/sensationalism_test.csv",
             sep='\t'
         )
         
@@ -154,11 +154,11 @@ class DatasetGenerator:
     def generate_generality_dataset(self, spiced_train_ds, spiced_val_ds, spiced_test_ds):
         """Generate certainty classification dataset."""
         train_labels = pd.read_csv(
-            self.data_dir / "aggregated-labels/certainty/train-test-splits/general_train.tsv",
+            self.data_dir / "aggregated-labels/generalization/train-test-splits/general_train.tsv",
             sep='\t'
         )
         test_labels = pd.read_csv(
-            self.data_dir / "aggregated-labels/certainty/train-test-splits/general_test.tsv",
+            self.data_dir / "aggregated-labels/generalization/train-test-splits/general_test.tsv",
             sep='\t'
         )
         
