@@ -5,6 +5,7 @@ import argparse
 from pathlib import Path
 
 from src.data.dataset_generator import DatasetGenerator
+from src.data.multitask_dataset_generator import MultitaskDatasetGenerator
 from src.models.causality_base_model import CausalityBaselineTrainer
 from src.models.certainty_base_model import CertaintyBaselineTrainer
 from src.models.generalization_base_model import GeneralizationBaselineTrainer
@@ -34,7 +35,12 @@ def main():
         print("Generating datasets...")
         generator = DatasetGenerator()
         generator.generate_all_datasets()
-        print("✓ Datasets generated")
+        print("✓ Single-task datasets generated")
+        
+        # Generate multi-task datasets
+        multitask_generator = MultitaskDatasetGenerator()
+        multitask_generator.generate_all_multitask_datasets()
+        print("✓ Multi-task datasets generated")
     
     set_seed(42)
     

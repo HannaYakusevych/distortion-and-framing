@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 
 from src.data.dataset_generator import DatasetGenerator
+from src.data.multitask_dataset_generator import MultitaskDatasetGenerator
 from src.models.causality_base_model import CausalityBaselineTrainer
 from src.models.certainty_base_model import CertaintyBaselineTrainer
 from src.models.generalization_base_model import GeneralizationBaselineTrainer
@@ -22,6 +23,10 @@ def run_baseline_experiments(use_compressed_data: bool = False, use_scibert: boo
     # Generate datasets
     generator = DatasetGenerator()
     generator.generate_all_datasets()
+    
+    # Generate multi-task datasets
+    multitask_generator = MultitaskDatasetGenerator()
+    multitask_generator.generate_all_multitask_datasets()
     
     # Train models
     results = {}
