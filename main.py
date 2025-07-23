@@ -8,6 +8,7 @@ from src.data.dataset_generator import DatasetGenerator
 from src.models.causality_base_model import CausalityBaselineTrainer
 from src.models.certainty_base_model import CertaintyBaselineTrainer
 from src.models.generalization_base_model import GeneralizationBaselineTrainer
+from src.models.sensationalism_base_model import SensationalismBaselineTrainer
 from src.utils.evaluation import EvaluationUtils
 
 from transformers import set_seed
@@ -61,6 +62,12 @@ def main():
             generalization_trainer = GeneralizationBaselineTrainer(output_dir=args.output_dir)
             results['generalization'] = generalization_trainer.run_training()
             print("✓ Generalization model trained")
+        
+        if args.model in ['sensationalism-base', 'all']:
+            print("Training sensationalism model...")
+            sensationalism_trainer = SensationalismBaselineTrainer(output_dir=args.output_dir)
+            results['sensationalism'] = sensationalism_trainer.run_training()
+            print("✓ Sensationalism model trained")
         
         # Print summary
         if results:

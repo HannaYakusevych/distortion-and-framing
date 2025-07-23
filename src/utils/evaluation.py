@@ -42,9 +42,16 @@ class EvaluationUtils:
         for task in tasks:
             if task in results:
                 row = {'Task': task}
-                f1_scores = results[task]['f1_per_class']
-                row.update({f'Class_{i}': f1_scores[i] for i in range(len(f1_scores))})
-                row['Macro_F1'] = results[task]['macro_f1']
+                if task == 'sensationalism':
+                    # Regression task - different metrics
+                    row['Pearson_Correlation'] = results[task]['pearson_correlation']
+                    row['P_Value'] = results[task]['p_value']
+                    row['MSE'] = results[task]['mse']
+                else:
+                    # Classification task
+                    f1_scores = results[task]['f1_per_class']
+                    row.update({f'Class_{i}': f1_scores[i] for i in range(len(f1_scores))})
+                    row['Macro_F1'] = results[task]['macro_f1']
                 data.append(row)
         
         return pd.DataFrame(data)

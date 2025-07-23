@@ -9,6 +9,7 @@ from src.data.dataset_generator import DatasetGenerator
 from src.models.causality_base_model import CausalityBaselineTrainer
 from src.models.certainty_base_model import CertaintyBaselineTrainer
 from src.models.generalization_base_model import GeneralizationBaselineTrainer
+from src.models.sensationalism_base_model import SensationalismBaselineTrainer
 from src.utils.evaluation import EvaluationUtils
 import json
 
@@ -37,6 +38,10 @@ def run_baseline_experiments(use_compressed_data: bool = False):
     generalization_trainer = GeneralizationBaselineTrainer()
     results['generalization'] = generalization_trainer.run_training()
     
+    # Sensationalism
+    sensationalism_trainer = SensationalismBaselineTrainer()
+    results['sensationalism'] = sensationalism_trainer.run_training()
+    
     # Save results
     output_file = Path(f'out/baseline_results_{use_compressed_data}.json')
     output_file.parent.mkdir(exist_ok=True)
@@ -44,10 +49,19 @@ def run_baseline_experiments(use_compressed_data: bool = False):
     # Convert numpy arrays to lists for JSON serialization
     json_results = {}
     for task, task_results in results.items():
-        json_results[task] = {
-            'f1_per_class': task_results['f1_per_class'].tolist(),
-            'macro_f1': float(task_results['macro_f1'])
-        }
+        if task == 'sensationalism':
+            # Sensationalism is regression, different metrics
+            json_results[task] = {
+                'pearson_correlation': float(task_results['pearson_correlation']),
+                'p_value': float(task_results['p_value']),
+                'mse': float(task_results['mse'])
+            }
+        else:
+            # Classification tasks
+            json_results[task] = {
+                'f1_per_class': task_results['f1_per_class'].tolist(),
+                'macro_f1': float(task_results['macro_f1'])
+            }
     
     with open(output_file, 'w') as f:
         json.dump(json_results, f, indent=2)
