@@ -10,6 +10,7 @@ from src.models.causality_base_model import CausalityBaselineTrainer
 from src.models.certainty_base_model import CertaintyBaselineTrainer
 from src.models.generalization_base_model import GeneralizationBaselineTrainer
 from src.models.sensationalism_base_model import SensationalismBaselineTrainer
+from src.models.multitask_classifier_model_sep import MultitaskBaselineTrainer
 from src.utils.evaluation import EvaluationUtils
 
 from transformers import set_seed
@@ -18,12 +19,16 @@ def main():
     parser = argparse.ArgumentParser(description='Distortion and Framing Analysis')
     parser.add_argument('--task', choices=['generate', 'train', 'all'], 
                        default='all', help='Task to run')
-    parser.add_argument('--model', choices=['causality-base', 'certainty-base', 'generalization-base', 'sensationalism-base', 'all'],
+    parser.add_argument('--model', choices=['causality-base', 'certainty-base', 'generalization-base', 'sensationalism-base', 'multitask-base', 'all'],
                        default='all', help='Which model to train')
     parser.add_argument('--use-compressed-data', choices=['true', 'false'], 
                        default='false', help='Use compressed data with fewer classes')
     parser.add_argument('--use-scibert', choices=['true', 'false'], 
                        default='false', help='Use SciBERT instead of RoBERTa for causality model')
+    parser.add_argument('--optimize-hyperparams', choices=['true', 'false'], 
+                       default='false', help='Run hyperparameter optimization for multi-task model')
+    parser.add_argument('--max-combinations', type=int,
+                       default='false', help='Run hyperparameter optimization for multi-task model')
     parser.add_argument('--output-dir', default='out', help='Output directory')
     
     args = parser.parse_args()
@@ -49,6 +54,7 @@ def main():
 
         use_compressed_data = args.use_compressed_data == 'true'
         use_scibert = args.use_scibert == 'true'
+        optimize_hyperparams = args.optimize_hyperparams == 'true'
         
         if args.model in ['causality-base', 'all']:
             model_type = "SciBERT" if use_scibert else "RoBERTa"
@@ -87,6 +93,23 @@ def main():
                 output_dir=args.output_dir)
             results['sensationalism'] = sensationalism_trainer.run_training()
             print("✓ Sensationalism model trained")
+        
+        if args.model in ['multitask-base', 'all']:
+            model_type = "SciBERT" if use_scibert else "RoBERTa"
+            print(f"Training multi-task model with {model_type}...")
+            multitask_trainer = MultitaskBaselineTrainer(
+                use_scibert=use_scibert,
+                output_dir=args.output_dir)
+            
+            if optimize_hyperparams:
+                print("Running hyperparameter optimization...")
+                multitask_trainer.run_hyperparameter_optimization(
+                    max_combinations=args.max_combinations
+                )
+                results['multitask'] = multitask_trainer.run_training_with_best_hyperparams()
+            else:
+                results['multitask'] = multitask_trainer.run_training()
+            print("✓ Multi-task model trained")
         
         # Print summary
         if results:
