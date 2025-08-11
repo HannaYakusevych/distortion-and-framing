@@ -1,7 +1,19 @@
 #!/bin/bash
 # Script to activate the distortion-framing conda environment
+# 
+# USAGE: source activate_env.sh
+# (Don't use 'bash activate_env.sh' - that won't persist the environment)
 
 echo "🔄 Activating distortion-framing environment with Python 3.10.11..."
+
+# Initialize conda if not already done
+if ! command -v conda &> /dev/null; then
+    echo "❌ Conda not found. Please install conda first."
+    exit 1
+fi
+
+# Source conda and activate environment
+source $(conda info --base)/etc/profile.d/conda.sh
 conda activate distortion-framing
 
 echo "✅ Environment activated!"

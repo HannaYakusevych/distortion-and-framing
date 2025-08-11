@@ -77,12 +77,13 @@ class SensationalismBaselineTrainer:
     
     def create_model(self):
         """Create regression model (RoBERTa or SciBERT)."""
-        # Load pretrained model for sequence classification
-        model = AutoModelForSequenceClassification.from_pretrained(self.model_name, num_labels=1)
+        # Load config and modify for regression
+        config = AutoConfig.from_pretrained(self.model_name)
+        config.num_labels = 1
+        config.problem_type = "regression"
         
-        # Replace the classifier head with a regression head
-        model.classifier = nn.Linear(model.config.hidden_size, 1)
-        model.num_labels = 1
+        # Load pretrained model for sequence classification with regression config
+        model = AutoModelForSequenceClassification.from_pretrained(self.model_name, config=config)
         
         return model
     
