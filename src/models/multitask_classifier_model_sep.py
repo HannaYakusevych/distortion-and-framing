@@ -9,6 +9,7 @@ import itertools
 import pandas as pd
 import numpy as np
 import torch
+import warnings
 from torch import nn
 from datasets import Dataset
 from transformers import (
@@ -18,7 +19,11 @@ from transformers import (
     TrainingArguments,
     Trainer,
     DataCollatorWithPadding,
+    TrainerCallback,
+    EarlyStoppingCallback,
 )
+from dataclasses import dataclass
+from typing import Any, Dict, List, Union
 from transformers.modeling_outputs import SequenceClassifierOutput
 from sklearn.metrics import f1_score
 
@@ -55,6 +60,9 @@ class MultiTaskClassifierModel(nn.Module):
         """Enable gradient checkpointing if supported by base model."""
         if hasattr(self.base_model, 'gradient_checkpointing_enable'):
             try:
+                # Set use_reentrant=False for better performance and to avoid warnings
+                if 'use_reentrant' not in kwargs:
+                    kwargs['use_reentrant'] = False
                 self.base_model.gradient_checkpointing_enable(**kwargs)
             except TypeError:
                 # Fallback for models that don't accept kwargs
@@ -147,6 +155,78 @@ class MultiTaskClassifierModel(nn.Module):
         )
 
 
+
+@dataclass
+class MultiTaskDataCollator:
+    """Data collator that properly handles multi-task labels."""
+    
+    tokenizer: AutoTokenizer
+    padding: Union[bool, str] = "max_length"
+    max_length: int = None
+    pad_to_multiple_of: int = None
+    
+    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+        # Extract labels before padding
+        labels = []
+        if "labels" in features[0]:
+            labels = [feature.pop("labels") for feature in features]
+        
+        # Use the specified padding strategy
+        padding_strategy = self.padding
+        
+        # Use standard padding for input features
+        batch = self.tokenizer.pad(
+            features,
+            padding=padding_strategy,
+            max_length=self.max_length,
+            pad_to_multiple_of=self.pad_to_multiple_of,
+            return_tensors="pt",
+        )
+        
+        # Add labels back as a proper tensor
+        if labels:
+            batch["labels"] = torch.tensor(labels, dtype=torch.long)
+        
+        return batch
+
+
+class EarlyStoppingMultiTaskCallback(TrainerCallback):
+    """Custom early stopping callback for multi-task learning."""
+    
+    def __init__(self, early_stopping_patience: int = 3, early_stopping_threshold: float = 0.0):
+        self.early_stopping_patience = early_stopping_patience
+        self.early_stopping_threshold = early_stopping_threshold
+        self.best_metric = None
+        self.best_model_checkpoint = None
+        self.patience_counter = 0
+        
+    def on_evaluate(self, args, state, control, model, logs=None, **kwargs):
+        """Called after evaluation."""
+        if logs is None:
+            return
+            
+        # Get the combined metric (average of causality and certainty F1)
+        current_metric = logs.get("eval_combined_f1", None)
+        if current_metric is None:
+            return
+            
+        # Check if this is the best model so far
+        if self.best_metric is None or current_metric > self.best_metric + self.early_stopping_threshold:
+            self.best_metric = current_metric
+            self.patience_counter = 0
+            # Save the best model checkpoint path
+            self.best_model_checkpoint = f"{args.output_dir}/checkpoint-{state.global_step}"
+            print(f"New best model found with combined F1: {current_metric:.4f}")
+        else:
+            self.patience_counter += 1
+            print(f"No improvement for {self.patience_counter} evaluations")
+            
+        # Stop training if patience exceeded
+        if self.patience_counter >= self.early_stopping_patience:
+            print(f"Early stopping triggered after {self.patience_counter} evaluations without improvement")
+            control.should_training_stop = True
+
+
 class MultitaskBaselineTrainer:
     """Trainer for multi-task causality and certainty classification."""
     
@@ -156,7 +236,13 @@ class MultitaskBaselineTrainer:
                  temp_dir: str = "temp",
                  max_length: int = 1536,
                  use_scibert: bool = False,
+                 early_stopping_patience: int = 3,
+                 early_stopping_threshold: float = 0.001,
                  **training_kwargs):
+        
+        # Suppress common warnings
+        warnings.filterwarnings("ignore", message=".*torch.utils.checkpoint.*use_reentrant.*")
+        warnings.filterwarnings("ignore", message=".*max_length.*is ignored when.*padding.*True.*")
         
         # Set model name based on scibert flag
         if use_scibert:
@@ -167,6 +253,8 @@ class MultitaskBaselineTrainer:
         self.output_dir = Path(output_dir)
         self.temp_dir = Path(temp_dir)
         self.training_kwargs = training_kwargs
+        self.early_stopping_patience = early_stopping_patience
+        self.early_stopping_threshold = early_stopping_threshold
         
         # Initialize tokenizer and get model config to check max position embeddings
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -223,9 +311,24 @@ class MultitaskBaselineTrainer:
         batch_size = min(1000, len(test_dataset))
         test_dataset = test_dataset.map(self.tokenize_function, batched=True, batch_size=batch_size)
         
+        # Create combined labels for the Trainer (it expects a single 'labels' field)
+        def add_combined_labels(examples):
+            # Stack causality and certainty labels into a proper tensor format
+            import torch
+            causality_labels = examples['causality_labels']
+            certainty_labels = examples['certainty_labels']
+            
+            # Create a 2D list where each row is [causality, certainty]
+            combined = [[c, cert] for c, cert in zip(causality_labels, certainty_labels)]
+            examples['labels'] = combined
+            return examples
+        
+        train_dataset = train_dataset.map(add_combined_labels, batched=True)
+        test_dataset = test_dataset.map(add_combined_labels, batched=True)
+        
         # Set format for PyTorch
-        train_dataset.set_format("torch", columns=["input_ids", "attention_mask", "causality_labels", "certainty_labels"])
-        test_dataset.set_format("torch", columns=["input_ids", "attention_mask", "causality_labels", "certainty_labels"])
+        train_dataset.set_format("torch", columns=["input_ids", "attention_mask", "labels", "causality_labels", "certainty_labels"])
+        test_dataset.set_format("torch", columns=["input_ids", "attention_mask", "labels", "causality_labels", "certainty_labels"])
         
         return train_dataset, test_dataset
     
@@ -236,13 +339,86 @@ class MultitaskBaselineTrainer:
             causality_num_labels=len(self.causality_id2label),
             certainty_num_labels=len(self.certainty_id2label)
         )
+        
+        # Configure gradient checkpointing with proper settings
+        if hasattr(model, 'gradient_checkpointing_enable'):
+            try:
+                model.gradient_checkpointing_enable(use_reentrant=False)
+            except (TypeError, AttributeError):
+                # Fallback for older versions
+                pass
+        
         return model
     
-    def train_model(self, model, train_dataset: Dataset):
-        """Train the multi-task model."""
+    def compute_metrics(self, eval_pred):
+        """Compute metrics for evaluation during training."""
+        predictions, labels = eval_pred
+        
+        # Convert to numpy arrays if they aren't already
+        if hasattr(predictions, 'numpy'):
+            predictions = predictions.numpy()
+        
+        # Split the combined logits back into task-specific logits
+        causality_logits = predictions[:, :len(self.causality_id2label)]
+        certainty_logits = predictions[:, len(self.causality_id2label):]
+        
+        # Get predictions
+        causality_preds = causality_logits.argmax(axis=1)
+        certainty_preds = certainty_logits.argmax(axis=1)
+        
+        # Handle the tuple format - labels come as (causality_array, certainty_array)
+        try:
+            if isinstance(labels, tuple) and len(labels) == 2:
+                # Labels are a tuple of (causality_labels, certainty_labels)
+                causality_true, certainty_true = labels
+                
+                # Convert to numpy if needed
+                if hasattr(causality_true, 'numpy'):
+                    causality_true = causality_true.numpy()
+                if hasattr(certainty_true, 'numpy'):
+                    certainty_true = certainty_true.numpy()
+                    
+            elif hasattr(labels, 'numpy'):
+                # Convert tensor to numpy first
+                labels = labels.numpy()
+                if len(labels.shape) == 2 and labels.shape[1] == 2:
+                    causality_true = labels[:, 0]
+                    certainty_true = labels[:, 1]
+                else:
+                    print(f"Warning: Unexpected label shape: {labels.shape}")
+                    return {'combined_f1': 0.0, 'causality_f1': 0.0, 'certainty_f1': 0.0}
+            else:
+                print(f"Warning: Unexpected label format: {type(labels)}")
+                return {'combined_f1': 0.0, 'causality_f1': 0.0, 'certainty_f1': 0.0}
+            
+            # Calculate F1 scores
+            causality_f1 = f1_score(causality_true, causality_preds, average='macro')
+            certainty_f1 = f1_score(certainty_true, certainty_preds, average='macro')
+            combined_f1 = (causality_f1 + certainty_f1) / 2
+            
+            return {
+                'causality_f1': causality_f1,
+                'certainty_f1': certainty_f1,
+                'combined_f1': combined_f1
+            }
+            
+        except Exception as e:
+            print(f"Error in compute_metrics: {e}")
+            print(f"Labels type: {type(labels)}")
+            if isinstance(labels, tuple):
+                print(f"Tuple length: {len(labels)}")
+                print(f"First element type: {type(labels[0])}, shape: {getattr(labels[0], 'shape', 'no shape')}")
+                print(f"Second element type: {type(labels[1])}, shape: {getattr(labels[1], 'shape', 'no shape')}")
+            else:
+                print(f"Labels shape: {getattr(labels, 'shape', 'no shape')}")
+            print(f"Predictions shape: {predictions.shape}")
+            return {'combined_f1': 0.0, 'causality_f1': 0.0, 'certainty_f1': 0.0}
+
+    def train_model(self, model, train_dataset: Dataset, eval_dataset: Dataset = None):
+        """Train the multi-task model with early stopping."""
         training_args = TrainingArguments(
             output_dir=str(self.output_dir / "temp_training"),
-            num_train_epochs=self.training_kwargs.get('num_train_epochs', 5),
+            num_train_epochs=self.training_kwargs.get('num_train_epochs', 10),
             per_device_train_batch_size=self.training_kwargs.get('per_device_train_batch_size', 8),
             per_device_eval_batch_size=self.training_kwargs.get('per_device_eval_batch_size', 8),
             logging_dir=str(self.output_dir / "logs"),
@@ -251,25 +427,63 @@ class MultitaskBaselineTrainer:
             learning_rate=self.training_kwargs.get('learning_rate', 2e-5),
             weight_decay=self.training_kwargs.get('weight_decay', 0.01),
             warmup_steps=self.training_kwargs.get('warmup_steps', 200),
-            save_strategy="no",
+            # Enable evaluation and saving for early stopping
+            evaluation_strategy="steps" if eval_dataset is not None else "no",
+            eval_steps=50 if eval_dataset is not None else None,
+            save_strategy="steps" if eval_dataset is not None else "no",
+            save_steps=50 if eval_dataset is not None else None,
+            save_total_limit=3,  # Keep only the 3 most recent checkpoints
+            load_best_model_at_end=True if eval_dataset is not None else False,
+            metric_for_best_model="combined_f1" if eval_dataset is not None else None,
+            greater_is_better=True,
         )
         
-        # Create data collator for consistent padding
-        data_collator = DataCollatorWithPadding(
+        # Create custom data collator for multi-task learning
+        data_collator = MultiTaskDataCollator(
             tokenizer=self.tokenizer,
-            padding=True
+            padding="max_length",
+            max_length=self.max_length
         )
+        
+        # Prepare callbacks
+        callbacks = []
+        if eval_dataset is not None:
+            early_stopping_callback = EarlyStoppingMultiTaskCallback(
+                early_stopping_patience=self.early_stopping_patience,
+                early_stopping_threshold=self.early_stopping_threshold
+            )
+            callbacks.append(early_stopping_callback)
         
         trainer = Trainer(
             model=model,
             args=training_args,
             train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
             data_collator=data_collator,
+            compute_metrics=self.compute_metrics if eval_dataset is not None else None,
+            callbacks=callbacks,
         )
         
         trainer.train()
+        
+        # Load the best model if early stopping was used
+        if eval_dataset is not None and callbacks:
+            best_checkpoint = callbacks[0].best_model_checkpoint
+            if best_checkpoint and Path(best_checkpoint).exists():
+                print(f"Loading best model from {best_checkpoint}")
+                trainer.model.load_state_dict(
+                    torch.load(Path(best_checkpoint) / "pytorch_model.bin", map_location="cpu")
+                )
+        
         return trainer
     
+    def prepare_labels_for_evaluation(self, dataset: Dataset):
+        """Prepare labels in the format expected by compute_metrics."""
+        # Stack causality and certainty labels into a 2D array
+        causality_labels = dataset['causality_labels'].numpy()
+        certainty_labels = dataset['certainty_labels'].numpy()
+        return np.stack([causality_labels, certainty_labels], axis=1)
+
     def evaluate_model(self, trainer: Trainer, test_dataset: Dataset):
         """Evaluate multi-task model."""
         predictions = trainer.predict(test_dataset)
@@ -310,7 +524,7 @@ class MultitaskBaselineTrainer:
             }
         }
     
-    def run_training(self):
+    def run_training(self, use_validation_split: bool = True, validation_size: float = 0.2):
         """Run the complete training pipeline for multi-task classification."""
         # Load data
         train_dataset, test_dataset = self.load_data(
@@ -318,22 +532,35 @@ class MultitaskBaselineTrainer:
             'causality_certainty_test.csv'
         )
         
+        # Create validation split if requested
+        eval_dataset = None
+        if use_validation_split:
+            train_dataset, eval_dataset = self.create_validation_split(train_dataset, validation_size)
+            print(f"Created validation split: {len(train_dataset)} train, {len(eval_dataset)} validation")
+        
         # Prepare datasets
-        train_dataset, test_dataset = self.prepare_datasets(train_dataset, test_dataset)
+        if eval_dataset is not None:
+            train_dataset, eval_dataset = self.prepare_datasets(train_dataset, eval_dataset)
+            train_dataset, test_dataset = self.prepare_datasets(train_dataset, test_dataset)
+        else:
+            train_dataset, test_dataset = self.prepare_datasets(train_dataset, test_dataset)
         
         # Create model
         model = self.create_model()
         
-        # Train
-        trainer = self.train_model(model, train_dataset)
+        # Train with early stopping if validation set is available
+        trainer = self.train_model(model, train_dataset, eval_dataset)
         
-        # Save model
+        # Save the best model
         model_name = 'baseline_scibert_multitask' if self.use_scibert else 'baseline_roberta_multitask'
         model_path = self.output_dir / model_name
         model_path.mkdir(parents=True, exist_ok=True)
         torch.save(model.state_dict(), model_path / 'pytorch_model.bin')
         
-        # Evaluate
+        # Save tokenizer and config for later use
+        self.tokenizer.save_pretrained(model_path)
+        
+        # Evaluate on test set
         results = self.evaluate_model(trainer, test_dataset)
         
         print(f"Causality F1 scores per class: {results['causality']['f1_per_class']}")
@@ -350,7 +577,6 @@ class MultitaskBaselineTrainer:
             return {
                 'learning_rate': [1e-5, 2e-5, 3e-5],
                 'per_device_train_batch_size': [4, 8],  # Smaller batch sizes
-                'num_train_epochs': [3, 5],
                 'weight_decay': [0.0, 0.01],
                 'warmup_steps': [100, 200],
                 'max_length': [256, 512, 1024]  # Shorter sequences
@@ -359,11 +585,10 @@ class MultitaskBaselineTrainer:
             # Full search space
             return {
                 'learning_rate': [1e-5, 2e-5, 3e-5, 5e-5],
-                'per_device_train_batch_size': [4, 8, 16],
-                'num_train_epochs': [3, 5, 7],
+                'per_device_train_batch_size': [4, 8],
                 'weight_decay': [0.0, 0.01, 0.1],
                 'warmup_steps': [100, 200, 500],
-                'max_length': [256, 512, 1024]
+                'max_length': [256, 512]
             }
     
     def create_validation_split(self, train_dataset: Dataset, val_size: float = 0.2) -> Tuple[Dataset, Dataset]:
@@ -392,7 +617,7 @@ class MultitaskBaselineTrainer:
     
     def evaluate_hyperparameters(self, hyperparams: Dict[str, Any], 
                                 train_dataset: Dataset, val_dataset: Dataset) -> Dict[str, float]:
-        """Evaluate a specific hyperparameter configuration."""
+        """Evaluate a specific hyperparameter configuration with early stopping."""
         original_max_length = self.max_length
         
         try:
@@ -420,25 +645,41 @@ class MultitaskBaselineTrainer:
             # Create model
             model = self.create_model()
             
-            # Create training arguments with hyperparameters
-            training_args = self._create_training_args(temp_kwargs)
+            # Create training arguments with hyperparameters and early stopping
+            training_args = self._create_training_args_with_early_stopping(temp_kwargs)
             
-            # Create data collator for consistent padding
-            data_collator = DataCollatorWithPadding(
+            # Create custom data collator for multi-task learning
+            data_collator = MultiTaskDataCollator(
                 tokenizer=self.tokenizer,
-                padding=True
+                padding="max_length",
+                max_length=self.max_length
             )
             
-            # Create trainer
+            # Create early stopping callback
+            early_stopping_callback = EarlyStoppingMultiTaskCallback(
+                early_stopping_patience=2,  # Shorter patience for hyperparameter search
+                early_stopping_threshold=self.early_stopping_threshold
+            )
+            
+            # Create trainer with early stopping
             trainer = Trainer(
                 model=model,
                 args=training_args,
                 train_dataset=train_dataset,
+                eval_dataset=val_dataset,
                 data_collator=data_collator,
+                compute_metrics=self.compute_metrics,
+                callbacks=[early_stopping_callback],
             )
             
             # Train model
             trainer.train()
+            
+            # Load best model if available
+            if early_stopping_callback.best_model_checkpoint and Path(early_stopping_callback.best_model_checkpoint).exists():
+                trainer.model.load_state_dict(
+                    torch.load(Path(early_stopping_callback.best_model_checkpoint) / "pytorch_model.bin", map_location="cpu")
+                )
             
             # Evaluate on validation set
             results = self.evaluate_model(trainer, val_dataset)
@@ -469,8 +710,7 @@ class MultitaskBaselineTrainer:
                     'hyperparams': hyperparams,
                     'error': 'CUDA_OOM'
                 }
-            else:
-                raise e
+            raise e
         finally:
             # Always restore original max_length
             self.max_length = original_max_length
@@ -483,8 +723,22 @@ class MultitaskBaselineTrainer:
         batch_size = min(1000, len(val_dataset))
         val_dataset = val_dataset.map(self.tokenize_function, batched=True, batch_size=batch_size)
         
+        # Create combined labels for the Trainer
+        def add_combined_labels(examples):
+            # Stack causality and certainty labels into a proper tensor format
+            causality_labels = examples['causality_labels']
+            certainty_labels = examples['certainty_labels']
+            
+            # Create a 2D list where each row is [causality, certainty]
+            combined = [[c, cert] for c, cert in zip(causality_labels, certainty_labels)]
+            examples['labels'] = combined
+            return examples
+        
+        train_dataset = train_dataset.map(add_combined_labels, batched=True)
+        val_dataset = val_dataset.map(add_combined_labels, batched=True)
+        
         # Set format for PyTorch
-        columns = ["input_ids", "attention_mask", "causality_labels", "certainty_labels"]
+        columns = ["input_ids", "attention_mask", "labels", "causality_labels", "certainty_labels"]
         train_dataset.set_format("torch", columns=columns)
         val_dataset.set_format("torch", columns=columns)
         
@@ -494,7 +748,7 @@ class MultitaskBaselineTrainer:
         """Create training arguments with hyperparameters."""
         return TrainingArguments(
             output_dir=str(self.output_dir / "temp_hyperparam_training"),
-            num_train_epochs=temp_kwargs.get('num_train_epochs', 5),
+            num_train_epochs=temp_kwargs.get('num_train_epochs', 10),
             per_device_train_batch_size=temp_kwargs.get('per_device_train_batch_size', 8),
             per_device_eval_batch_size=min(temp_kwargs.get('per_device_eval_batch_size', 8), 8),
             learning_rate=temp_kwargs.get('learning_rate', 2e-5),
@@ -505,7 +759,31 @@ class MultitaskBaselineTrainer:
             logging_steps=100,
             save_strategy="no",
             dataloader_pin_memory=False,
-            gradient_checkpointing=True,
+        )
+    
+    def _create_training_args_with_early_stopping(self, temp_kwargs: Dict[str, Any]) -> TrainingArguments:
+        """Create training arguments with hyperparameters and early stopping."""
+        return TrainingArguments(
+            output_dir=str(self.output_dir / "temp_hyperparam_training"),
+            num_train_epochs=temp_kwargs.get('num_train_epochs', 10),
+            per_device_train_batch_size=temp_kwargs.get('per_device_train_batch_size', 8),
+            per_device_eval_batch_size=min(temp_kwargs.get('per_device_eval_batch_size', 8), 8),
+            learning_rate=temp_kwargs.get('learning_rate', 2e-5),
+            weight_decay=temp_kwargs.get('weight_decay', 0.01),
+            warmup_steps=temp_kwargs.get('warmup_steps', 200),
+            logging_dir=str(self.output_dir / "logs"),
+            logging_strategy="steps",
+            logging_steps=50,
+            # Enable evaluation and saving for early stopping
+            evaluation_strategy="steps",
+            eval_steps=100,
+            save_strategy="steps",
+            save_steps=100,
+            save_total_limit=2,
+            load_best_model_at_end=True,
+            metric_for_best_model="combined_f1",
+            greater_is_better=True,
+            dataloader_pin_memory=False,
         )
     
     def grid_search_hyperparameters(self, max_combinations: int = 50, memory_safe: bool = False) -> Dict[str, Any]:
@@ -649,5 +927,4 @@ class MultitaskBaselineTrainer:
         """Run hyperparameter optimization with specified strategy."""
         if strategy == "grid_search":
             return self.grid_search_hyperparameters(max_combinations=max_combinations)
-        else:
-            raise ValueError(f"Unknown optimization strategy: {strategy}")
+        raise ValueError(f"Unknown optimization strategy: {strategy}")
