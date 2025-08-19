@@ -558,10 +558,10 @@ class MultitaskRegressionTrainer:
                     sensationalism_true = labels[:, 2].astype(float)
                 else:
                     print(f"Warning: Unexpected label shape: {labels.shape}")
-                    return {'combined_score': 0.0, 'causality_f1': 0.0, 'certainty_f1': 0.0, 'sensationalism_mse': float('inf')}
+                    return {'combined_score': 0.0, 'causality_f1': 0.0, 'certainty_f1': 0.0, 'sensationalism_mse': "Infinity"}
             else:
                 print(f"Warning: Unexpected label format: {type(labels)}")
-                return {'combined_score': 0.0, 'causality_f1': 0.0, 'certainty_f1': 0.0, 'sensationalism_mse': float('inf')}
+                return {'combined_score': 0.0, 'causality_f1': 0.0, 'certainty_f1': 0.0, 'sensationalism_mse': "Infinity"}
             
             # Calculate F1 scores for classification tasks
             causality_f1 = f1_score(causality_true, causality_preds, average='macro')
@@ -606,7 +606,7 @@ class MultitaskRegressionTrainer:
             else:
                 print(f"Labels shape: {getattr(labels, 'shape', 'no shape')}")
             print(f"Predictions shape: {predictions.shape}")
-            return {'combined_score': 0.0, 'causality_f1': 0.0, 'certainty_f1': 0.0, 'sensationalism_mse': float('inf')}
+            return {'combined_score': 0.0, 'causality_f1': 0.0, 'certainty_f1': 0.0, 'sensationalism_mse': "Infinity"}
 
     def train_model(self, model, train_dataset: Dataset, eval_dataset: Dataset = None):
         """Train the multi-task model with early stopping."""
@@ -622,7 +622,7 @@ class MultitaskRegressionTrainer:
             weight_decay=self.training_kwargs.get('weight_decay', 0.01),
             warmup_steps=self.training_kwargs.get('warmup_steps', 200),
             # Enable evaluation and saving for early stopping
-            eval_strategy="steps" if eval_dataset is not None else "no",
+            evaluation_strategy="steps" if eval_dataset is not None else "no",
             eval_steps=50 if eval_dataset is not None else None,
             save_strategy="steps" if eval_dataset is not None else "no",
             save_steps=50 if eval_dataset is not None else None,
@@ -802,6 +802,27 @@ class MultitaskRegressionTrainer:
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
     
+    def _convert_to_json_serializable(self, obj):
+        """Convert NumPy types and other non-JSON-serializable types to JSON-serializable types."""
+        if isinstance(obj, dict):
+            return {key: self._convert_to_json_serializable(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [self._convert_to_json_serializable(item) for item in obj]
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif obj is np.inf or obj == float('inf'):
+            return "Infinity"
+        elif obj is -np.inf or obj == float('-inf'):
+            return "-Infinity"
+        elif obj != obj:  # Check for NaN
+            return "NaN"
+        else:
+            return obj
+    
     def get_hyperparameter_space(self, memory_safe: bool = False) -> Dict[str, List[Any]]:
         """Define hyperparameter search space for multi-task regression."""
         if memory_safe:
@@ -918,11 +939,11 @@ class MultitaskRegressionTrainer:
             self.clear_gpu_memory()
             
             return {
-                'combined_score': combined_score,
-                'causality_f1': results['causality']['macro_f1'],
-                'certainty_f1': results['certainty']['macro_f1'],
-                'sensationalism_correlation': results['sensationalism']['pearson_correlation'],
-                'sensationalism_mse': results['sensationalism']['mse'],
+                'combined_score': float(combined_score),
+                'causality_f1': float(results['causality']['macro_f1']),
+                'certainty_f1': float(results['certainty']['macro_f1']),
+                'sensationalism_correlation': float(results['sensationalism']['pearson_correlation']),
+                'sensationalism_mse': float(results['sensationalism']['mse']),
                 'hyperparams': hyperparams
             }
             
@@ -936,7 +957,7 @@ class MultitaskRegressionTrainer:
                     'causality_f1': 0.0,
                     'certainty_f1': 0.0,
                     'sensationalism_correlation': 0.0,
-                    'sensationalism_mse': float('inf'),
+                    'sensationalism_mse': "Infinity",  # Use string for JSON serialization
                     'hyperparams': hyperparams,
                     'error': 'CUDA_OOM'
                 }
@@ -989,7 +1010,7 @@ class MultitaskRegressionTrainer:
             learning_rate=temp_kwargs.get('learning_rate', 2e-5),
             weight_decay=temp_kwargs.get('weight_decay', 0.01),
             warmup_steps=temp_kwargs.get('warmup_steps', 200),
-            eval_strategy="steps",
+            evaluation_strategy="steps",
             eval_steps=100,  # More frequent evaluation for early stopping
             save_strategy="steps",
             save_steps=100,
@@ -1079,19 +1100,40 @@ class MultitaskRegressionTrainer:
                     'causality_f1': 0.0,
                     'certainty_f1': 0.0,
                     'sensationalism_correlation': 0.0,
-                    'sensationalism_mse': float('inf'),
+                    'sensationalism_mse': "Infinity",
                     'hyperparams': hyperparams,
                     'error': str(e)[:200]
                 })
                 continue
         
-        # Save results
+        # Save results - convert NumPy types to JSON-serializable types
+        def convert_numpy_types(obj):
+            """Convert NumPy types to JSON-serializable types."""
+            if isinstance(obj, dict):
+                return {key: convert_numpy_types(value) for key, value in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy_types(item) for item in obj]
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif obj == float('inf'):
+                return "Infinity"
+            elif obj == float('-inf'):
+                return "-Infinity"
+            elif obj != obj:  # Check for NaN
+                return "NaN"
+            else:
+                return obj
+        
         results_file = self.output_dir / 'hyperparameter_search_results_regression.json'
         with open(results_file, 'w') as f:
             json.dump({
                 'best_hyperparams': best_hyperparams,
-                'best_score': best_score,
-                'all_results': all_results
+                'best_score': float(best_score) if best_score is not None else None,
+                'all_results': convert_numpy_types(all_results)
             }, f, indent=2)
         
         print(f"\nHyperparameter search completed!")
@@ -1153,3 +1195,24 @@ class MultitaskRegressionTrainer:
             return self.grid_search_hyperparameters(max_combinations=max_combinations)
         else:
             raise ValueError(f"Unknown optimization strategy: {strategy}")
+    
+    def _convert_to_json_serializable(self, obj):
+        """Convert NumPy types and other non-JSON-serializable types to JSON-serializable types."""
+        if isinstance(obj, dict):
+            return {key: self._convert_to_json_serializable(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [self._convert_to_json_serializable(item) for item in obj]
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif obj is np.inf or obj == float('inf'):
+            return "Infinity"
+        elif obj is -np.inf or obj == float('-inf'):
+            return "-Infinity"
+        elif obj != obj:  # Check for NaN
+            return "NaN"
+        else:
+            return obj
