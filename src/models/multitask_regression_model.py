@@ -1023,7 +1023,7 @@ class MultitaskRegressionTrainer:
             gradient_checkpointing=False,  # Disable for stability during hyperparameter search
         )
     
-    def grid_search_hyperparameters(self, max_combinations: int = 50, memory_safe: bool = False) -> Dict[str, Any]:
+    def grid_search_hyperparameters(self, max_combinations: int = None, memory_safe: bool = False) -> Dict[str, Any]:
         """Perform grid search over hyperparameter space."""
         print("Starting hyperparameter grid search for multi-task regression...")
         
@@ -1050,10 +1050,12 @@ class MultitaskRegressionTrainer:
         values = list(hyperparam_space.values())
         all_combinations = list(itertools.product(*values))
         
-        # Limit combinations if too many
-        if len(all_combinations) > max_combinations:
+        # Limit combinations if max_combinations is specified
+        if max_combinations is not None and len(all_combinations) > max_combinations:
             print(f"Limiting search to {max_combinations} random combinations out of {len(all_combinations)}")
             all_combinations = random.sample(all_combinations, max_combinations)
+        else:
+            print(f"Running full hyperparameter search with {len(all_combinations)} combinations")
         
         best_score = -1
         best_hyperparams = None
@@ -1189,7 +1191,7 @@ class MultitaskRegressionTrainer:
         # Run normal training with optimized hyperparameters
         return self.run_training()
     
-    def run_hyperparameter_optimization(self, strategy: str = "grid_search", max_combinations: int = 20) -> Dict[str, Any]:
+    def run_hyperparameter_optimization(self, strategy: str = "grid_search", max_combinations: int = None) -> Dict[str, Any]:
         """Run hyperparameter optimization with specified strategy."""
         if strategy == "grid_search":
             return self.grid_search_hyperparameters(max_combinations=max_combinations)

@@ -31,7 +31,10 @@ from sklearn.metrics import f1_score
 class MultiTaskClassifierModel(nn.Module):
     """Multi-task model for causality and certainty classification."""
     
-    def __init__(self, model_name: str, causality_num_labels: int = 3, certainty_num_labels: int = 3):
+    def __init__(self, model_name: str, causality_num_labels: int = 3, certainty_num_labels: int = 3, 
+                 loss_weights: Tuple[float, float] = (1.0, 1.0),
+                 causality_class_weights: Tuple[float, float, float] = None,
+                 certainty_class_weights: Tuple[float, float, float] = None):
         super().__init__()
         
         # Load base model configuration and model
@@ -55,6 +58,13 @@ class MultiTaskClassifierModel(nn.Module):
         self.causality_num_labels = causality_num_labels
         self.certainty_num_labels = certainty_num_labels
         self.num_labels = causality_num_labels + certainty_num_labels
+        
+        # Loss weights for each task (causality_weight, certainty_weight)
+        self.loss_weights = loss_weights
+        
+        # Class weights for handling class imbalance (optional)
+        self.causality_class_weights = causality_class_weights
+        self.certainty_class_weights = certainty_class_weights
     
     def gradient_checkpointing_enable(self, **kwargs):
         """Enable gradient checkpointing if supported by base model."""
@@ -123,26 +133,48 @@ class MultiTaskClassifierModel(nn.Module):
         
         # Calculate losses if labels are provided
         total_loss = None
-        loss_fct = nn.CrossEntropyLoss()
         
         losses = []
+        loss_weights = []
+        
         if causality_labels is not None:
-            causality_loss = loss_fct(
+            # Use weighted cross-entropy if class weights are provided
+            if self.causality_class_weights is not None:
+                class_weights = torch.tensor(self.causality_class_weights, 
+                                           dtype=torch.float32, 
+                                           device=causality_logits.device)
+                causality_loss_fct = nn.CrossEntropyLoss(weight=class_weights)
+            else:
+                causality_loss_fct = nn.CrossEntropyLoss()
+                
+            causality_loss = causality_loss_fct(
                 causality_logits.view(-1, self.causality_num_labels), 
                 causality_labels.view(-1)
             )
             losses.append(causality_loss)
+            loss_weights.append(self.loss_weights[0])  # Use custom causality weight
         
         if certainty_labels is not None:
-            certainty_loss = loss_fct(
+            # Use weighted cross-entropy if class weights are provided
+            if self.certainty_class_weights is not None:
+                class_weights = torch.tensor(self.certainty_class_weights, 
+                                           dtype=torch.float32, 
+                                           device=certainty_logits.device)
+                certainty_loss_fct = nn.CrossEntropyLoss(weight=class_weights)
+            else:
+                certainty_loss_fct = nn.CrossEntropyLoss()
+                
+            certainty_loss = certainty_loss_fct(
                 certainty_logits.view(-1, self.certainty_num_labels), 
                 certainty_labels.view(-1)
             )
             losses.append(certainty_loss)
+            loss_weights.append(self.loss_weights[1])  # Use custom certainty weight
         
-        # Combine losses with equal weighting
+        # Combine losses with custom weighting
         if losses:
-            total_loss = sum(losses)
+            weighted_losses = [loss * weight for loss, weight in zip(losses, loss_weights)]
+            total_loss = sum(weighted_losses)
         
         # Combine logits for compatibility
         combined_logits = torch.cat([causality_logits, certainty_logits], dim=-1)
@@ -332,12 +364,17 @@ class MultitaskBaselineTrainer:
         
         return train_dataset, test_dataset
     
-    def create_model(self):
+    def create_model(self, loss_weights: Tuple[float, float] = (1.0, 1.0),
+                     causality_class_weights: Tuple[float, float, float] = None,
+                     certainty_class_weights: Tuple[float, float, float] = None):
         """Create multi-task model."""
         model = MultiTaskClassifierModel(
             model_name=self.model_name,
             causality_num_labels=len(self.causality_id2label),
-            certainty_num_labels=len(self.certainty_id2label)
+            certainty_num_labels=len(self.certainty_id2label),
+            loss_weights=loss_weights,
+            causality_class_weights=causality_class_weights,
+            certainty_class_weights=certainty_class_weights
         )
         
         # Configure gradient checkpointing with proper settings
@@ -524,7 +561,10 @@ class MultitaskBaselineTrainer:
             }
         }
     
-    def run_training(self, use_validation_split: bool = True, validation_size: float = 0.2):
+    def run_training(self, use_validation_split: bool = True, validation_size: float = 0.2, 
+                     loss_weights: Tuple[float, float] = (1.0, 1.0),
+                     causality_class_weights: Tuple[float, float, float] = None,
+                     certainty_class_weights: Tuple[float, float, float] = None):
         """Run the complete training pipeline for multi-task classification."""
         # Load data
         train_dataset, test_dataset = self.load_data(
@@ -546,7 +586,11 @@ class MultitaskBaselineTrainer:
             train_dataset, test_dataset = self.prepare_datasets(train_dataset, test_dataset)
         
         # Create model
-        model = self.create_model()
+        model = self.create_model(
+            loss_weights=loss_weights,
+            causality_class_weights=causality_class_weights,
+            certainty_class_weights=certainty_class_weights
+        )
         
         # Train with early stopping if validation set is available
         trainer = self.train_model(model, train_dataset, eval_dataset)
@@ -579,7 +623,34 @@ class MultitaskBaselineTrainer:
                 'per_device_train_batch_size': [4, 8],  # Smaller batch sizes
                 'weight_decay': [0.0, 0.01],
                 'warmup_steps': [100, 200],
-                'max_length': [256, 512, 1024]  # Shorter sequences
+                'max_length': [256, 512, 1024],  # Shorter sequences
+                # Loss weights for the two tasks (causality_weight, certainty_weight)
+                # Keep sum constant at 2.0 to maintain loss magnitude (original: 1.0 + 1.0 = 2.0)
+                'loss_weights': [
+                    (1.0, 1.0),   # Original equal weights
+                    (1.2, 0.8),   # Favor causality slightly
+                    (0.8, 1.2),   # Favor certainty slightly
+                    (1.5, 0.5),   # Favor causality more
+                    (0.5, 1.5),   # Favor certainty more
+                    (1.6, 0.4),   # Strong causality preference
+                    (0.4, 1.6),   # Strong certainty preference
+                ],
+                # Class weights for handling class imbalance (causality: Unclear, Causation, Correlation)
+                'causality_class_weights': [
+                    None,                    # No class weighting (standard cross-entropy)
+                    (1.0, 1.0, 1.0),        # Equal weights (equivalent to None)
+                    (1.2, 0.9, 0.9),        # Slightly favor Unclear class
+                    (0.8, 1.1, 1.1),        # Slightly favor Causation and Correlation
+                    (1.5, 0.75, 0.75),      # Strong favor for Unclear class
+                ],
+                # Class weights for certainty (Certain, Somewhat certain, Uncertain)
+                'certainty_class_weights': [
+                    None,                    # No class weighting (standard cross-entropy)
+                    (1.0, 1.0, 1.0),        # Equal weights (equivalent to None)
+                    (0.9, 1.1, 1.0),        # Slightly favor Somewhat certain
+                    (0.8, 1.0, 1.2),        # Favor Uncertain class
+                    (1.2, 0.9, 0.9),        # Favor Certain class
+                ]
             }
         else:
             # Full search space
@@ -588,7 +659,50 @@ class MultitaskBaselineTrainer:
                 'per_device_train_batch_size': [4, 8],
                 'weight_decay': [0.0, 0.01, 0.1],
                 'warmup_steps': [100, 200, 500],
-                'max_length': [256, 512]
+                'max_length': [256, 512],
+                # Loss weights for the two tasks (causality_weight, certainty_weight)
+                # Keep sum constant at 2.0 to maintain loss magnitude (original: 1.0 + 1.0 = 2.0)
+                'loss_weights': [
+                    (1.0, 1.0),   # Original equal weights
+                    (1.1, 0.9),   # Slightly favor causality
+                    (0.9, 1.1),   # Slightly favor certainty
+                    (1.2, 0.8),   # Favor causality
+                    (0.8, 1.2),   # Favor certainty
+                    (1.3, 0.7),   # Favor causality more
+                    (0.7, 1.3),   # Favor certainty more
+                    (1.4, 0.6),   # Strong causality preference
+                    (0.6, 1.4),   # Strong certainty preference
+                    (1.5, 0.5),   # Very strong causality preference
+                    (0.5, 1.5),   # Very strong certainty preference
+                    (1.6, 0.4),   # Extreme causality preference
+                    (0.4, 1.6),   # Extreme certainty preference
+                ],
+                # Class weights for handling class imbalance (causality: Unclear, Causation, Correlation)
+                'causality_class_weights': [
+                    None,                    # No class weighting (standard cross-entropy)
+                    (1.0, 1.0, 1.0),        # Equal weights (equivalent to None)
+                    (1.1, 0.95, 0.95),      # Slightly favor Unclear class
+                    (0.9, 1.05, 1.05),      # Slightly favor Causation and Correlation
+                    (1.2, 0.9, 0.9),        # Favor Unclear class
+                    (0.8, 1.1, 1.1),        # Favor Causation and Correlation
+                    (1.3, 0.85, 0.85),      # Strong favor for Unclear class
+                    (0.7, 1.15, 1.15),      # Strong favor for Causation and Correlation
+                    (1.5, 0.75, 0.75),      # Very strong favor for Unclear class
+                    (0.6, 1.2, 1.2),        # Very strong favor for Causation and Correlation
+                ],
+                # Class weights for certainty (Certain, Somewhat certain, Uncertain)
+                'certainty_class_weights': [
+                    None,                    # No class weighting (standard cross-entropy)
+                    (1.0, 1.0, 1.0),        # Equal weights (equivalent to None)
+                    (0.95, 1.05, 1.0),      # Slightly favor Somewhat certain
+                    (0.9, 1.0, 1.1),        # Favor Uncertain class
+                    (1.1, 0.95, 0.95),      # Favor Certain class
+                    (0.85, 1.1, 1.05),      # Favor Somewhat certain and Uncertain
+                    (1.2, 0.9, 0.9),        # Strong favor for Certain class
+                    (0.8, 1.1, 1.1),        # Strong favor for Somewhat certain and Uncertain
+                    (0.7, 1.0, 1.3),        # Very strong favor for Uncertain class
+                    (1.3, 0.85, 0.85),      # Very strong favor for Certain class
+                ]
             }
     
     def create_validation_split(self, train_dataset: Dataset, val_size: float = 0.2) -> Tuple[Dataset, Dataset]:
@@ -642,8 +756,17 @@ class MultitaskBaselineTrainer:
                 self.max_length = hyperparams['max_length']
                 train_dataset, val_dataset = self._retokenize_datasets(train_dataset, val_dataset)
             
+            # Get loss weights and class weights from hyperparameters if specified
+            loss_weights = hyperparams.get('loss_weights', (1.0, 1.0))
+            causality_class_weights = hyperparams.get('causality_class_weights', None)
+            certainty_class_weights = hyperparams.get('certainty_class_weights', None)
+            
             # Create model
-            model = self.create_model()
+            model = self.create_model(
+                loss_weights=loss_weights,
+                causality_class_weights=causality_class_weights,
+                certainty_class_weights=certainty_class_weights
+            )
             
             # Create training arguments with hyperparameters and early stopping
             training_args = self._create_training_args_with_early_stopping(temp_kwargs)
@@ -786,7 +909,7 @@ class MultitaskBaselineTrainer:
             dataloader_pin_memory=False,
         )
     
-    def grid_search_hyperparameters(self, max_combinations: int = 50, memory_safe: bool = False) -> Dict[str, Any]:
+    def grid_search_hyperparameters(self, max_combinations: int = None, memory_safe: bool = False) -> Dict[str, Any]:
         """Perform grid search over hyperparameter space."""
         print("Starting hyperparameter grid search...")
         
@@ -813,22 +936,42 @@ class MultitaskBaselineTrainer:
         values = list(hyperparam_space.values())
         all_combinations = list(itertools.product(*values))
         
-        # Limit combinations if too many
-        if len(all_combinations) > max_combinations:
+        # Limit combinations if max_combinations is specified
+        if max_combinations is not None and len(all_combinations) > max_combinations:
             print(f"Limiting search to {max_combinations} random combinations out of {len(all_combinations)}")
             all_combinations = random.sample(all_combinations, max_combinations)
+        else:
+            print(f"Running full hyperparameter search with {len(all_combinations)} combinations")
         
+        # Initialize results file and tracking variables
+        results_file = self.output_dir / 'hyperparameter_search_results.json'
+        progress_file = self.output_dir / 'hyperparameter_search_progress.json'
+        
+        # Load existing results if resuming
         best_score = -1
         best_hyperparams = None
         all_results = []
+        start_index = 0
+        
+        if results_file.exists():
+            try:
+                with open(results_file, 'r') as f:
+                    existing_results = json.load(f)
+                all_results = existing_results.get('all_results', [])
+                best_score = existing_results.get('best_score', -1)
+                best_hyperparams = existing_results.get('best_hyperparams', None)
+                start_index = len(all_results)
+                print(f"Resuming from combination {start_index + 1}/{len(all_combinations)}")
+            except (json.JSONDecodeError, KeyError):
+                print("Could not load existing results, starting fresh")
         
         print(f"Evaluating {len(all_combinations)} hyperparameter combinations...")
         
-        successful_runs = 0
-        oom_errors = 0
-        other_errors = 0
+        successful_runs = sum(1 for r in all_results if 'error' not in r)
+        oom_errors = sum(1 for r in all_results if r.get('error') == 'CUDA_OOM')
+        other_errors = sum(1 for r in all_results if 'error' in r and r.get('error') != 'CUDA_OOM')
         
-        for i, combination in enumerate(all_combinations):
+        for i, combination in enumerate(all_combinations[start_index:], start=start_index):
             hyperparams = dict(zip(keys, combination))
             
             print(f"[{i+1}/{len(all_combinations)}] Testing: {hyperparams}")
@@ -841,17 +984,19 @@ class MultitaskBaselineTrainer:
                     if result['error'] == 'CUDA_OOM':
                         oom_errors += 1
                         print(f"  CUDA OOM - Skipping this configuration")
-                    continue
-                
-                successful_runs += 1
-                print(f"  Combined F1: {result['combined_score']:.4f} "
-                      f"(Causality: {result['causality_f1']:.4f}, "
-                      f"Certainty: {result['certainty_f1']:.4f})")
-                
-                if result['combined_score'] > best_score:
-                    best_score = result['combined_score']
-                    best_hyperparams = hyperparams
-                    print(f"  *** New best score: {best_score:.4f} ***")
+                    else:
+                        other_errors += 1
+                        print(f"  Error: {result['error'][:100]}...")
+                else:
+                    successful_runs += 1
+                    print(f"  Combined F1: {result['combined_score']:.4f} "
+                          f"(Causality: {result['causality_f1']:.4f}, "
+                          f"Certainty: {result['certainty_f1']:.4f})")
+                    
+                    if result['combined_score'] > best_score:
+                        best_score = result['combined_score']
+                        best_hyperparams = hyperparams
+                        print(f"  *** New best score: {best_score:.4f} ***")
                 
             except Exception as e:
                 other_errors += 1
@@ -864,16 +1009,42 @@ class MultitaskBaselineTrainer:
                     'hyperparams': hyperparams,
                     'error': str(e)[:200]
                 })
-                continue
-        
-        # Save results
-        results_file = self.output_dir / 'hyperparameter_search_results.json'
-        with open(results_file, 'w') as f:
-            json.dump({
+            
+            # Save results after each step
+            current_results = {
                 'best_hyperparams': best_hyperparams,
                 'best_score': best_score,
-                'all_results': all_results
-            }, f, indent=2)
+                'all_results': all_results,
+                'progress': {
+                    'completed': i + 1,
+                    'total': len(all_combinations),
+                    'successful_runs': successful_runs,
+                    'oom_errors': oom_errors,
+                    'other_errors': other_errors
+                }
+            }
+            
+            # Save main results file
+            with open(results_file, 'w') as f:
+                json.dump(current_results, f, indent=2)
+            
+            # Save progress file with timestamp
+            import time
+            progress_data = {
+                'timestamp': time.time(),
+                'completed_combinations': i + 1,
+                'total_combinations': len(all_combinations),
+                'current_best_score': best_score,
+                'current_best_hyperparams': best_hyperparams,
+                'successful_runs': successful_runs,
+                'oom_errors': oom_errors,
+                'other_errors': other_errors
+            }
+            
+            with open(progress_file, 'w') as f:
+                json.dump(progress_data, f, indent=2)
+            
+            print(f"  Progress saved ({i+1}/{len(all_combinations)} completed)")
         
         print(f"\nHyperparameter search completed!")
         print(f"Successful runs: {successful_runs}/{len(all_combinations)}")
@@ -920,10 +1091,95 @@ class MultitaskBaselineTrainer:
         if 'max_length' in best_hyperparams:
             self.max_length = best_hyperparams['max_length']
         
+        # Get loss weights and class weights from best hyperparameters
+        loss_weights = best_hyperparams.get('loss_weights', (1.0, 1.0))
+        causality_class_weights = best_hyperparams.get('causality_class_weights', None)
+        certainty_class_weights = best_hyperparams.get('certainty_class_weights', None)
+        
         # Run normal training with optimized hyperparameters
-        return self.run_training()
+        return self.run_training(
+            loss_weights=loss_weights,
+            causality_class_weights=causality_class_weights,
+            certainty_class_weights=certainty_class_weights
+        )
     
-    def run_hyperparameter_optimization(self, strategy: str = "grid_search", max_combinations: int = 20) -> Dict[str, Any]:
+    def get_hyperparameter_search_progress(self) -> Dict[str, Any]:
+        """Get current progress of hyperparameter search."""
+        progress_file = self.output_dir / 'hyperparameter_search_progress.json'
+        results_file = self.output_dir / 'hyperparameter_search_results.json'
+        
+        if not progress_file.exists() and not results_file.exists():
+            return {'status': 'not_started', 'message': 'No hyperparameter search found'}
+        
+        progress_data = {}
+        if progress_file.exists():
+            try:
+                with open(progress_file, 'r') as f:
+                    progress_data = json.load(f)
+            except (json.JSONDecodeError, FileNotFoundError):
+                pass
+        
+        results_data = {}
+        if results_file.exists():
+            try:
+                with open(results_file, 'r') as f:
+                    results_data = json.load(f)
+            except (json.JSONDecodeError, FileNotFoundError):
+                pass
+        
+        # Combine information from both files
+        combined_info = {
+            'status': 'in_progress' if progress_data else 'completed',
+            'progress': progress_data,
+            'results_summary': {
+                'best_score': results_data.get('best_score', 0),
+                'best_hyperparams': results_data.get('best_hyperparams', {}),
+                'total_results': len(results_data.get('all_results', []))
+            }
+        }
+        
+        if progress_data:
+            import time
+            timestamp = progress_data.get('timestamp', 0)
+            if timestamp:
+                combined_info['last_updated'] = time.ctime(timestamp)
+        
+        return combined_info
+    
+    def print_hyperparameter_search_status(self):
+        """Print current status of hyperparameter search."""
+        progress = self.get_hyperparameter_search_progress()
+        
+        if progress['status'] == 'not_started':
+            print("No hyperparameter search has been started yet.")
+            return
+        
+        print("Hyperparameter Search Status:")
+        print("=" * 40)
+        
+        if 'last_updated' in progress:
+            print(f"Last updated: {progress['last_updated']}")
+        
+        if progress['status'] == 'in_progress':
+            prog_data = progress['progress']
+            completed = prog_data.get('completed_combinations', 0)
+            total = prog_data.get('total_combinations', 0)
+            percentage = (completed / total * 100) if total > 0 else 0
+            
+            print(f"Progress: {completed}/{total} ({percentage:.1f}%)")
+            print(f"Successful runs: {prog_data.get('successful_runs', 0)}")
+            print(f"CUDA OOM errors: {prog_data.get('oom_errors', 0)}")
+            print(f"Other errors: {prog_data.get('other_errors', 0)}")
+            print(f"Current best score: {prog_data.get('current_best_score', 0):.4f}")
+            print(f"Current best hyperparams: {prog_data.get('current_best_hyperparams', {})}")
+        else:
+            print("Status: Completed")
+            summary = progress['results_summary']
+            print(f"Total evaluations: {summary['total_results']}")
+            print(f"Best score: {summary['best_score']:.4f}")
+            print(f"Best hyperparams: {summary['best_hyperparams']}")
+    
+    def run_hyperparameter_optimization(self, strategy: str = "grid_search", max_combinations: int = None) -> Dict[str, Any]:
         """Run hyperparameter optimization with specified strategy."""
         if strategy == "grid_search":
             return self.grid_search_hyperparameters(max_combinations=max_combinations)
