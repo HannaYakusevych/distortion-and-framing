@@ -222,41 +222,6 @@ class MultiTaskDataCollator:
         return batch
 
 
-class EarlyStoppingMultiTaskCallback(TrainerCallback):
-    """Custom early stopping callback for multi-task learning."""
-    
-    def __init__(self, early_stopping_patience: int = 3, early_stopping_threshold: float = 0.0):
-        self.early_stopping_patience = early_stopping_patience
-        self.early_stopping_threshold = early_stopping_threshold
-        self.best_metric = None
-        self.best_model_checkpoint = None
-        self.patience_counter = 0
-        
-    def on_evaluate(self, args, state, control, model, logs=None, **kwargs):
-        """Called after evaluation."""
-        if logs is None:
-            return
-            
-        # Get the combined metric (average of causality and certainty F1)
-        current_metric = logs.get("eval_combined_f1", None)
-        if current_metric is None:
-            return
-            
-        # Check if this is the best model so far
-        if self.best_metric is None or current_metric > self.best_metric + self.early_stopping_threshold:
-            self.best_metric = current_metric
-            self.patience_counter = 0
-            # Save the best model checkpoint path
-            self.best_model_checkpoint = f"{args.output_dir}/checkpoint-{state.global_step}"
-            print(f"New best model found with combined F1: {current_metric:.4f}")
-        else:
-            self.patience_counter += 1
-            print(f"No improvement for {self.patience_counter} evaluations")
-            
-        # Stop training if patience exceeded
-        if self.patience_counter >= self.early_stopping_patience:
-            print(f"Early stopping triggered after {self.patience_counter} evaluations without improvement")
-            control.should_training_stop = True
 
 
 class MultitaskBaselineTrainer:
@@ -268,7 +233,7 @@ class MultitaskBaselineTrainer:
                  temp_dir: str = "temp",
                  max_length: int = 1536,
                  use_scibert: bool = False,
-                 early_stopping_patience: int = 3,
+                 early_stopping_patience: int = 4,
                  early_stopping_threshold: float = 0.001,
                  **training_kwargs):
         
@@ -466,13 +431,13 @@ class MultitaskBaselineTrainer:
             warmup_steps=self.training_kwargs.get('warmup_steps', 200),
             # Enable evaluation and saving for early stopping
             evaluation_strategy="steps" if eval_dataset is not None else "no",
-            eval_steps=50 if eval_dataset is not None else None,
+            eval_steps=20 if eval_dataset is not None else None,
             save_strategy="steps" if eval_dataset is not None else "no",
-            save_steps=50 if eval_dataset is not None else None,
+            save_steps=20 if eval_dataset is not None else None,
             save_total_limit=3,  # Keep only the 3 most recent checkpoints
             load_best_model_at_end=True if eval_dataset is not None else False,
-            metric_for_best_model="combined_f1" if eval_dataset is not None else None,
-            greater_is_better=True,
+            metric_for_best_model="eval_loss" if eval_dataset is not None else None,
+            greater_is_better=False,  # Lower loss is better
         )
         
         # Create custom data collator for multi-task learning
@@ -485,7 +450,7 @@ class MultitaskBaselineTrainer:
         # Prepare callbacks
         callbacks = []
         if eval_dataset is not None:
-            early_stopping_callback = EarlyStoppingMultiTaskCallback(
+            early_stopping_callback = EarlyStoppingCallback(
                 early_stopping_patience=self.early_stopping_patience,
                 early_stopping_threshold=self.early_stopping_threshold
             )
@@ -503,14 +468,8 @@ class MultitaskBaselineTrainer:
         
         trainer.train()
         
-        # Load the best model if early stopping was used
-        if eval_dataset is not None and callbacks:
-            best_checkpoint = callbacks[0].best_model_checkpoint
-            if best_checkpoint and Path(best_checkpoint).exists():
-                print(f"Loading best model from {best_checkpoint}")
-                trainer.model.load_state_dict(
-                    torch.load(Path(best_checkpoint) / "pytorch_model.bin", map_location="cpu")
-                )
+        # The built-in EarlyStoppingCallback works with load_best_model_at_end=True
+        # so the best model is automatically loaded
         
         return trainer
     
@@ -779,7 +738,7 @@ class MultitaskBaselineTrainer:
             )
             
             # Create early stopping callback
-            early_stopping_callback = EarlyStoppingMultiTaskCallback(
+            early_stopping_callback = EarlyStoppingCallback(
                 early_stopping_patience=2,  # Shorter patience for hyperparameter search
                 early_stopping_threshold=self.early_stopping_threshold
             )
@@ -798,11 +757,6 @@ class MultitaskBaselineTrainer:
             # Train model
             trainer.train()
             
-            # Load best model if available
-            if early_stopping_callback.best_model_checkpoint and Path(early_stopping_callback.best_model_checkpoint).exists():
-                trainer.model.load_state_dict(
-                    torch.load(Path(early_stopping_callback.best_model_checkpoint) / "pytorch_model.bin", map_location="cpu")
-                )
             
             # Evaluate on validation set
             results = self.evaluate_model(trainer, val_dataset)
@@ -904,8 +858,8 @@ class MultitaskBaselineTrainer:
             save_steps=100,
             save_total_limit=2,
             load_best_model_at_end=True,
-            metric_for_best_model="combined_f1",
-            greater_is_better=True,
+            metric_for_best_model="eval_loss",
+            greater_is_better=False,  # Lower loss is better
             dataloader_pin_memory=False,
         )
     
