@@ -28,6 +28,7 @@ from transformers.modeling_outputs import SequenceClassifierOutput
 from sklearn.metrics import f1_score, mean_squared_error, mean_absolute_error
 from scipy.stats import pearsonr
 
+from gradnorm_pytorch import GradNormLossWeighter
 
 class MultiTaskRegressionModel(nn.Module):
     """Multi-task model for causality, certainty classification and sensationalism regression."""
@@ -71,10 +72,33 @@ class MultiTaskRegressionModel(nn.Module):
             self.momentum = 0.9  # For exponential moving average
         elif loss_balancing == "gradnorm":
             # GradNorm: learnable task weights (Chen et al., 2018)
-            self.task_weights = nn.Parameter(torch.ones(3))  # 3 tasks
-            self.register_buffer('initial_losses', torch.zeros(3))
-            self.register_buffer('gradnorm_initialized', torch.tensor(0.0))  # Use 0.0 for False, 1.0 for True
-            self.alpha = 1.5  # GradNorm hyperparameter
+            # Use the existing gradnorm_pytorch library
+            self.gradnorm_weighter = GradNormLossWeighter(
+                num_losses=3,  # 3 tasks: causality, certainty, sensationalism
+                learning_rate=1e-4,
+                restoring_force_alpha=1.5,  # Alpha parameter from original paper
+                frozen=False,
+                initial_losses_decay=1.0,  # No decay of initial losses
+                update_after_step=0,
+                update_every=1
+            )
+            # Store task weights for compatibility
+            self.task_weights = self.gradnorm_weighter.loss_weights
+        else:
+            self.task_weights = None # No task weights if not using GradNorm
+        
+        # Logging control
+        self.register_buffer('log_step', torch.tensor(0))
+        self.log_every_n_steps = 100  # Log every 100 steps to avoid excessive output
+    
+    def set_logging_frequency(self, log_every_n_steps: int):
+        """
+        Set the frequency of loss magnitude logging.
+        
+        Args:
+            log_every_n_steps: Log every N training steps (default: 100)
+        """
+        self.log_every_n_steps = log_every_n_steps
     
     def gradient_checkpointing_enable(self, **kwargs):
         """Enable gradient checkpointing if supported by base model."""
@@ -144,6 +168,30 @@ class MultiTaskRegressionModel(nn.Module):
         certainty_logits = self.certainty_classifier(pooled_output)
         sensationalism_logits = self.sensationalism_regressor(pooled_output).squeeze(-1)  # Remove last dimension
         
+        # If individual labels are not provided but a combined 'labels' tensor is,
+        # split it into task-specific labels to ensure we can compute a loss
+        if (causality_labels is None or certainty_labels is None or sensationalism_labels is None) and 'labels' in kwargs:
+            combined_labels = kwargs.get('labels')
+            if combined_labels is not None:
+                # Expect shape [batch_size, 3]: [causality, certainty, sensationalism]
+                try:
+                    if causality_labels is None:
+                        causality_labels = combined_labels[:, 0].long()
+                    if certainty_labels is None:
+                        certainty_labels = combined_labels[:, 1].long()
+                    if sensationalism_labels is None:
+                        sensationalism_labels = combined_labels[:, 2].float()
+                except Exception:
+                    # Fallback: handle 1D labels by reshaping if needed
+                    if combined_labels.dim() == 1 and combined_labels.numel() % 3 == 0:
+                        combined_labels = combined_labels.view(-1, 3)
+                        if causality_labels is None:
+                            causality_labels = combined_labels[:, 0].long()
+                        if certainty_labels is None:
+                            certainty_labels = combined_labels[:, 1].long()
+                        if sensationalism_labels is None:
+                            sensationalism_labels = combined_labels[:, 2].float()
+
         # Calculate losses if labels are provided
         total_loss = None
         classification_loss_fct = nn.CrossEntropyLoss()
@@ -152,7 +200,11 @@ class MultiTaskRegressionModel(nn.Module):
         losses = []
         loss_weights = []
         
+        # Ensure we have at least one loss computed to satisfy Trainer requirements
+        has_any_labels = False
+        
         if causality_labels is not None:
+            has_any_labels = True
             causality_loss = classification_loss_fct(
                 causality_logits.view(-1, self.causality_num_labels), 
                 causality_labels.view(-1)
@@ -161,6 +213,7 @@ class MultiTaskRegressionModel(nn.Module):
             loss_weights.append(1.0)  # Standard weight for classification
         
         if certainty_labels is not None:
+            has_any_labels = True
             certainty_loss = classification_loss_fct(
                 certainty_logits.view(-1, self.certainty_num_labels), 
                 certainty_labels.view(-1)
@@ -169,6 +222,7 @@ class MultiTaskRegressionModel(nn.Module):
             loss_weights.append(1.0)  # Standard weight for classification
         
         if sensationalism_labels is not None:
+            has_any_labels = True
             sensationalism_loss = regression_loss_fct(
                 sensationalism_logits.view(-1), 
                 sensationalism_labels.view(-1).float()
@@ -180,17 +234,35 @@ class MultiTaskRegressionModel(nn.Module):
             loss_weights.append(10.0)  # Scale up regression loss
         
         # Combine losses with balanced weighting
-        if losses:
+        if losses and has_any_labels:
             if self.loss_balancing == "adaptive" and self.training:
                 # Simple adaptive loss balancing based on running averages (heuristic)
                 total_loss = self._adaptive_loss_combination(losses, causality_labels, certainty_labels, sensationalism_labels)
             elif self.loss_balancing == "gradnorm" and self.training:
                 # GradNorm: Gradient Normalization (Chen et al., 2018)
-                total_loss = self._gradnorm_loss_combination(losses, causality_labels, certainty_labels, sensationalism_labels)
+                # Use the existing gradnorm_pytorch library
+                total_loss = self._gradnorm_library_implementation(losses, causality_labels, certainty_labels, sensationalism_labels)
             else:
                 # Fixed loss balancing with manual scaling
                 weighted_losses = [loss * weight for loss, weight in zip(losses, loss_weights)]
                 total_loss = sum(weighted_losses) / len(weighted_losses)  # Average to prevent scaling issues
+            
+            # Log individual losses and their magnitudes for analysis
+            if self.training:
+                # Update step counter
+                self.log_step.add_(1)
+                # Log every N steps to avoid excessive output
+                if self.log_step.item() % self.log_every_n_steps == 0:
+                    self._log_loss_magnitudes(losses, causality_labels, certainty_labels, sensationalism_labels, total_loss)
+            
+            # Increase overall loss magnitude by factor of 2 for better search space
+            if total_loss is not None:
+                total_loss = total_loss * 2.0
+        elif not has_any_labels and self.training:
+            # If no labels provided during training, create a dummy loss to satisfy Trainer
+            # This should not happen in normal training, but prevents crashes
+            print("Warning: No labels provided during training. Creating dummy loss.")
+            total_loss = torch.tensor(0.0, requires_grad=True, device=causality_logits.device)
         
         # Combine logits for compatibility - concatenate classification logits and regression output
         combined_logits = torch.cat([
@@ -242,58 +314,96 @@ class MultiTaskRegressionModel(nn.Module):
             num_tasks += 1
         
         return total_loss / num_tasks if num_tasks > 0 else None
-    
-    def _gradnorm_loss_combination(self, losses, causality_labels, certainty_labels, sensationalism_labels):
+
+    def _log_loss_magnitudes(self, losses, causality_labels, certainty_labels, sensationalism_labels, total_loss):
         """
-        GradNorm loss balancing (Chen et al., 2018).
-        "GradNorm: Gradient Normalization for Adaptive Loss Balancing in Deep Multitask Networks"
+        Log individual losses and their magnitudes for analysis.
+        This helps understand the relative scales of different tasks and their impact on training.
         """
-        # Initialize on first call
-        if self.gradnorm_initialized.item() == 0.0:  # Check if not initialized (0.0 = False)
-            current_losses = torch.stack([loss.detach() for loss in losses])
-            self.initial_losses.copy_(current_losses)
-            self.gradnorm_initialized.fill_(1.0)  # Set to 1.0 (True)
+        import logging
         
-        # Get current losses
-        current_losses = torch.stack([loss.detach() for loss in losses])
+        # Get logger
+        logger = logging.getLogger(__name__)
         
-        # Calculate relative loss ratios
-        loss_ratios = current_losses / (self.initial_losses + 1e-8)
+        # Get current step
+        step = self.log_step.item()
         
-        # Target: average loss ratio
-        target_ratio = loss_ratios.mean()
+        # Extract individual losses
+        loss_names = []
+        loss_values = []
         
-        # Calculate weighted loss
-        weighted_losses = [loss * weight for loss, weight in zip(losses, self.task_weights)]
-        total_loss = sum(weighted_losses)
+        if causality_labels is not None:
+            loss_names.append("causality")
+            loss_values.append(losses[0].item())
         
-        # Simplified GradNorm-inspired update
-        # Full GradNorm requires custom optimizer integration, so we use a simplified approach
-        if self.training and len(losses) > 1:
-            try:
-                # Simple adaptive weighting based on loss magnitudes
-                # This avoids gradient computation issues during training
-                with torch.no_grad():
-                    # Get relative loss magnitudes
-                    loss_values = torch.stack([loss.detach() for loss in losses])
-                    loss_ratios = loss_values / (self.initial_losses + 1e-8)
-                    
-                    # Target: balanced loss ratios (all should be close to mean)
-                    target_ratio = loss_ratios.mean()
-                    
-                    # Adjust weights to balance loss ratios
-                    # If a task has higher loss ratio, reduce its weight
-                    weight_adjustments = target_ratio / (loss_ratios + 1e-8)
-                    
-                    # Smooth update to avoid sudden changes
-                    new_weights = 0.9 * self.task_weights.data + 0.1 * weight_adjustments
-                    self.task_weights.data = torch.clamp(new_weights, min=0.1, max=10.0)
-                            
-            except Exception as e:
-                # If update fails, fall back to equal weighting
-                print(f"GradNorm-inspired update failed: {e}, using equal weights")
-                with torch.no_grad():
-                    self.task_weights.data.fill_(1.0)
+        if certainty_labels is not None:
+            loss_names.append("certainty")
+            loss_values.append(losses[1].item())
+        
+        if sensationalism_labels is not None:
+            loss_names.append("sensationalism")
+            loss_values.append(losses[2].item())
+        
+        # Calculate statistics
+        if loss_values:
+            min_loss = min(loss_values)
+            max_loss = max(loss_values)
+            mean_loss = sum(loss_values) / len(loss_values)
+            loss_range = max_loss - min_loss
+            
+            # Calculate loss ratios (relative to mean)
+            loss_ratios = [loss / mean_loss if mean_loss > 0 else 1.0 for loss in loss_values]
+            
+            # Log detailed information
+            logger.info(f"Step {step} - Loss Magnitudes Analysis:")
+            logger.info(f"  Total Loss (before scaling): {total_loss.item() if total_loss is not None else 'None'}")
+            logger.info(f"  Total Loss (after 2x scaling): {(total_loss.item() * 2.0) if total_loss is not None else 'None'}")
+            logger.info(f"  Individual Losses:")
+            for name, value, ratio in zip(loss_names, loss_values, loss_ratios):
+                logger.info(f"    {name}: {value:.6f} (ratio: {ratio:.3f})")
+            logger.info(f"  Statistics:")
+            logger.info(f"    Min: {min_loss:.6f}")
+            logger.info(f"    Max: {max_loss:.6f}")
+            logger.info(f"    Mean: {mean_loss:.6f}")
+            logger.info(f"    Range: {loss_range:.6f}")
+            logger.info(f"    Range/Mean: {loss_range/mean_loss if mean_loss > 0 else 0:.3f}")
+            
+            # Log GradNorm-specific information if using GradNorm
+            if self.loss_balancing == "gradnorm" and hasattr(self, 'task_weights'):
+                task_weights = self.task_weights.detach().cpu().numpy()
+                logger.info(f"  GradNorm Task Weights:")
+                for name, weight in zip(loss_names, task_weights):
+                    logger.info(f"    {name}: {weight:.6f}")
+                logger.info(f"  Weight Statistics:")
+                logger.info(f"    Min Weight: {task_weights.min():.6f}")
+                logger.info(f"    Max Weight: {task_weights.max():.6f}")
+                logger.info(f"    Mean Weight: {task_weights.mean():.6f}")
+                logger.info(f"    Weight Range: {task_weights.max() - task_weights.min():.6f}")
+            
+            logger.info("-" * 60)  # Separator for readability
+
+    def _gradnorm_library_implementation(self, losses, causality_labels, certainty_labels, sensationalism_labels):
+        """
+        GradNorm loss balancing using the gradnorm_pytorch library.
+        This implementation follows the original paper exactly using the established library.
+        """
+        # Set grad_norm_parameters to the base model parameters for gradient computation
+        # We use the first layer of the base model as the reference for gradient norms
+        if self.gradnorm_weighter.grad_norm_parameters is None:
+            # Get the first parameter from the base model as reference
+            base_params = list(self.base_model.parameters())
+            if base_params:
+                self.gradnorm_weighter._grad_norm_parameters[0] = base_params[0]
+        
+        # Stack losses into a tensor
+        losses_tensor = torch.stack(losses)
+        
+        # Use the GradNorm weighter to compute the balanced loss
+        # The weighter handles all the gradient computation and weight updates internally
+        total_loss = self.gradnorm_weighter(losses_tensor)
+        
+        # Update our task weights reference to match the library's weights
+        self.task_weights = self.gradnorm_weighter.loss_weights
         
         return total_loss
 
@@ -346,7 +456,7 @@ class MultitaskRegressionTrainer:
                  max_length: int = 1536,
                  use_scibert: bool = False,
                  early_stopping_patience: int = 4,
-                 early_stopping_threshold: float = 0.001,
+                 early_stopping_threshold: float = 0.0001,
                  loss_balancing: str = "fixed",
                  **training_kwargs):
         """
@@ -587,14 +697,14 @@ class MultitaskRegressionTrainer:
             weight_decay=self.training_kwargs.get('weight_decay', 0.01),
             warmup_steps=self.training_kwargs.get('warmup_steps', 200),
             # Enable evaluation and saving for early stopping
-            evaluation_strategy="steps" if eval_dataset is not None else "no",
+            eval_strategy="steps" if eval_dataset is not None else "no",
             eval_steps=50 if eval_dataset is not None else None,
             save_strategy="steps" if eval_dataset is not None else "no",
             save_steps=50 if eval_dataset is not None else None,
             save_total_limit=3,  # Keep only the 3 most recent checkpoints
             load_best_model_at_end=True if eval_dataset is not None else False,
-            metric_for_best_model="combined_score" if eval_dataset is not None else None,
-            greater_is_better=True,
+            metric_for_best_model="eval_loss",
+            greater_is_better=False,
         )
         
         # Create custom data collator for multi-task learning with regression
@@ -773,7 +883,7 @@ class MultitaskRegressionTrainer:
             return obj.tolist()
         elif obj is np.inf or obj == float('inf'):
             return "Infinity"
-        elif obj is -np.inf or obj == float('-inf'):
+        elif obj == float('-inf'):
             return "-Infinity"
         elif obj != obj:  # Check for NaN
             return "NaN"
@@ -785,7 +895,7 @@ class MultitaskRegressionTrainer:
         if memory_safe:
             # Conservative settings to avoid OOM
             return {
-                'learning_rate': [1e-5, 2e-5, 3e-5],
+                'learning_rate': [1e-5, 2e-5, 3e-5, 5e-5],
                 'per_device_train_batch_size': [4, 8],  # Smaller batch sizes
                 'weight_decay': [0.0, 0.01],
                 'warmup_steps': [100, 200],
@@ -795,7 +905,7 @@ class MultitaskRegressionTrainer:
         else:
             # Full search space
             return {
-                'learning_rate': [1e-8, 1e-7, 1e-6, 5e-6, 1e-5],
+                'learning_rate': [1e-5, 1e-5, 2e-5, 3e-5, 5e-5],
                 'per_device_train_batch_size': [4, 8],
                 'weight_decay': [0.0, 0.01, 0.1],
                 'warmup_steps': [100, 200, 500],
@@ -962,14 +1072,14 @@ class MultitaskRegressionTrainer:
             learning_rate=temp_kwargs.get('learning_rate', 2e-5),
             weight_decay=temp_kwargs.get('weight_decay', 0.01),
             warmup_steps=temp_kwargs.get('warmup_steps', 200),
-            evaluation_strategy="steps",
+            eval_strategy="steps",
             eval_steps=100,  # More frequent evaluation for early stopping
             save_strategy="steps",
             save_steps=100,
             save_total_limit=2,
             load_best_model_at_end=True,
-            metric_for_best_model="combined_score",
-            greater_is_better=True,
+            metric_for_best_model="eval_loss",
+            greater_is_better=False,
             report_to=None,  # Disable wandb/tensorboard for hyperparameter search
             dataloader_pin_memory=False,  # Reduce memory usage
             gradient_checkpointing=False,  # Disable for stability during hyperparameter search

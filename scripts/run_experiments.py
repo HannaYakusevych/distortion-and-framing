@@ -50,7 +50,7 @@ def run_hyperparameter_optimization(use_scibert: bool = False, max_combinations:
         if model_type == "regression":
             trainer = MultitaskRegressionTrainer(
                 use_scibert=use_scibert,
-                loss_balancing="fixed"  # Use fixed balancing for hyperparameter search
+                # loss_balancing="fixed"  # Use fixed balancing for hyperparameter search
             )
             optimization_results = trainer.run_hyperparameter_optimization(max_combinations=max_combinations)
             optimization_results['model_type'] = 'regression'
@@ -451,25 +451,64 @@ def run_quick_test():
 
 
 if __name__ == '__main__':
-    import sys
+    # run_baseline_experiments(use_compressed_data=True, use_scibert=False, include_regression=True)
+    # # run_baseline_experiments(use_compressed_data=True, use_scibert=True, include_regression=True)
+    # training_kwargs = {'learning_rate': 3e-05, 
+    #                'per_device_train_batch_size': 4, 
+    #                'weight_decay': 0.1, 
+    #                'warmup_steps': 100, 
+    #                'max_length': 512, 
+    #                'loss_weights': (1.3, 0.7),
+    #                'causality_class_weights': (0.9, 1.05, 1.05),
+    #                'certainty_class_weights': (1.3, 0.85, 0.85),
+    #               }
+    # multitask_trainer = MultitaskBaselineTrainer(output_dir = "./out", temp_dir = "./temp", use_scibert=False, num_train_epochs=4, training_kwargs=training_kwargs)
+    # optimization_results = multitask_trainer.run_training(use_validation_split=False)
+    run_hyperparameter_optimization(
+        use_scibert=False, 
+        max_combinations=20, 
+        model_type="regression"
+    )
+    # import sys
     
-    if len(sys.argv) > 1 and sys.argv[1] == 'quick':
-        # Quick test mode
-        run_quick_test()
-    elif len(sys.argv) > 1 and sys.argv[1] == 'hyperopt':
-        # Hyperparameter optimization only
-        set_seed(42)
-        print("Running hyperparameter optimization...")
+    # if len(sys.argv) > 1 and sys.argv[1] == 'quick':
+    #     # Quick test mode
+    #     run_quick_test()
+    # elif len(sys.argv) > 1 and sys.argv[1] == 'hyperopt':
+    #     # Hyperparameter optimization only
+    #     set_seed(42)
+    #     print("Running hyperparameter optimization...")
         
-        # Run for both model types
-        for use_scibert in [False, True]:
-            model_name = "SciBERT" if use_scibert else "RoBERTa"
-            print(f"\nOptimizing {model_name} classification model...")
-            run_hyperparameter_optimization(
-                use_scibert=use_scibert, 
-                max_combinations=20, 
-                model_type="classification"
-            )
-    else:
-        # Full comprehensive experiments
-        run_comprehensive_experiments()
+    #     # Run for both model types
+    #     for use_scibert in [False, True]:
+    #         model_name = "SciBERT" if use_scibert else "RoBERTa"
+    #         print(f"\nOptimizing {model_name} classification model...")
+    #         run_hyperparameter_optimization(
+    #             use_scibert=use_scibert, 
+    #             max_combinations=20, 
+    #             model_type="classification"
+    #         )
+    # else:
+    #     # Full comprehensive experiments
+    #     run_comprehensive_experiments()
+    # Save trained model artifacts
+    # try:
+    #     from pathlib import Path
+    #     import shutil
+    #     import datetime
+
+    #     # Determine model directory created by the trainer
+    #     model_dir_name = 'baseline_scibert_multitask' if True else 'baseline_roberta_multitask'
+    #     # Use the same output_dir passed to the trainer (default ../out here)
+    #     output_dir = Path("../out")
+    #     model_dir = output_dir / model_dir_name
+
+    #     if model_dir.exists() and model_dir.is_dir():
+    #         timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    #         archive_base = output_dir / f"{model_dir_name}_{timestamp}"
+    #         shutil.make_archive(str(archive_base), 'zip', root_dir=str(model_dir))
+    #         print(f"Model artifacts archived to {archive_base}.zip")
+    #     else:
+    #         print(f"Warning: Expected model directory not found at {model_dir}. Skipping archive.")
+    # except Exception as e:
+    #     print(f"Warning: Failed to archive model artifacts: {e}")

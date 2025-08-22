@@ -430,7 +430,7 @@ class MultitaskBaselineTrainer:
             weight_decay=self.training_kwargs.get('weight_decay', 0.01),
             warmup_steps=self.training_kwargs.get('warmup_steps', 200),
             # Enable evaluation and saving for early stopping
-            evaluation_strategy="steps" if eval_dataset is not None else "no",
+            eval_strategy="steps" if eval_dataset is not None else "no",
             eval_steps=20 if eval_dataset is not None else None,
             save_strategy="steps" if eval_dataset is not None else "no",
             save_steps=20 if eval_dataset is not None else None,
@@ -852,7 +852,7 @@ class MultitaskBaselineTrainer:
             logging_strategy="steps",
             logging_steps=50,
             # Enable evaluation and saving for early stopping
-            evaluation_strategy="steps",
+            eval_strategy="steps",
             eval_steps=100,
             save_strategy="steps",
             save_steps=100,

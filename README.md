@@ -48,6 +48,7 @@ python scripts/run_experiments.py quick
 ### Multi-Task Models
 - **Multi-task Classification**: Causality + Certainty
 - **Multi-task Regression**: All tasks combined
+- **Frozen Multi-task Sensationalism**: Transfer learning from pre-trained multi-task models
 
 ## Model Options
 
@@ -69,6 +70,9 @@ python run_multitask.py --loss-balancing adaptive
 
 # Hyperparameter optimization
 python run_multitask.py --optimize-hyperparams true --max-combinations 30
+
+# Frozen multi-task sensationalism experiment
+python run_frozen_multitask_sensationalism.py --use_validation_split
 ```
 
 ## Configuration
@@ -81,6 +85,9 @@ python run_multitask.py --optimize-hyperparams true --max-combinations 30
 | `--use-compressed-data` | true, false | false | Use reduced class dataset |
 | `--loss-balancing` | fixed, adaptive, gradnorm | fixed | Loss balancing strategy |
 | `--output-dir` | path | out | Output directory |
+| `--use_validation_split` | flag | false | Use validation split for early stopping |
+| `--learning_rate` | float | 3e-5 | Learning rate for training |
+| `--max_length` | int | 512 | Maximum sequence length |
 
 ## Performance
 
