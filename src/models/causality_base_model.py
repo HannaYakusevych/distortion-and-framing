@@ -24,13 +24,13 @@ class CausalityBaselineTrainer(BaseBaselineTrainer):
                 1: "Causation", 
                 2: "Correlation"
             }
-            self.defaultLabel2id = {
+            self.default_label2id = {
                 "Explicitly states: no relation": 0,
                 "Causation": 1, 
                 "Correlation": 2,
                 "No mention of a relation": 0  # Map to "Unclear"
             }
-            self.extraLabel2id = {
+            self.extra_label2id = {
                 0: 0,
                 1: 1,
                 2: 2
@@ -43,8 +43,8 @@ class CausalityBaselineTrainer(BaseBaselineTrainer):
                 2: "Correlation",
                 3: "No mention of a relation"
             }
-            self.defaultLabel2id = {v: k for k, v in self.id2label.items()}
-            self.extraLabel2id = None
+            self.default_label2id = {v: k for k, v in self.id2label.items()}
+            self.extra_label2id = None
     
     def run_training(self):
         """Run the complete training pipeline for causality classification."""
@@ -52,8 +52,8 @@ class CausalityBaselineTrainer(BaseBaselineTrainer):
         train_dataset, test_dataset = self.load_data(
             'causality_train.csv',
             'causality_test.csv', 
-            self.defaultLabel2id,
-            self.extraLabel2id
+            self.default_label2id,
+            self.extra_label2id
         )
         
         # Prepare datasets

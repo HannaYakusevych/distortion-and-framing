@@ -739,7 +739,7 @@ class MultitaskBaselineTrainer:
             
             # Create early stopping callback
             early_stopping_callback = EarlyStoppingCallback(
-                early_stopping_patience=2,  # Shorter patience for hyperparameter search
+                early_stopping_patience=3,  # Shorter patience for hyperparameter search
                 early_stopping_threshold=self.early_stopping_threshold
             )
             

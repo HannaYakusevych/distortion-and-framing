@@ -345,7 +345,7 @@ class MultitaskRegressionTrainer:
                  temp_dir: str = "temp",
                  max_length: int = 1536,
                  use_scibert: bool = False,
-                 early_stopping_patience: int = 3,
+                 early_stopping_patience: int = 4,
                  early_stopping_threshold: float = 0.001,
                  loss_balancing: str = "fixed",
                  **training_kwargs):
@@ -795,7 +795,7 @@ class MultitaskRegressionTrainer:
         else:
             # Full search space
             return {
-                'learning_rate': [1e-5, 2e-5, 3e-5, 5e-5],
+                'learning_rate': [1e-8, 1e-7, 1e-6, 5e-6, 1e-5],
                 'per_device_train_batch_size': [4, 8],
                 'weight_decay': [0.0, 0.01, 0.1],
                 'warmup_steps': [100, 200, 500],
@@ -859,7 +859,7 @@ class MultitaskRegressionTrainer:
             
             # Create early stopping callback
             early_stopping_callback = EarlyStoppingCallback(
-                early_stopping_patience=2,  # Shorter patience for hyperparameter search
+                early_stopping_patience=3,  # Shorter patience for hyperparameter search
                 early_stopping_threshold=self.early_stopping_threshold
             )
             
